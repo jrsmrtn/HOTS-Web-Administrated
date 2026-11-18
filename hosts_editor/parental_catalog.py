@@ -23,6 +23,9 @@ CATEGORIES = [
 TELEMETRY_CATEGORY = {"label_key": "par_cat_antispy_domains", "icon": "📡", "color": "#0078D4",
                       "file": "telemetry.txt"}
 
+DOH_CATEGORY = {"label_key": "par_cat_doh_bypass", "icon": "🔒", "color": "#0078D4",
+                "file": "doh_bypass.txt"}
+
 CUSTOM_FILE = "custom_domains.txt"
 
 

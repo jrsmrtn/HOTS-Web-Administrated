@@ -61,6 +61,9 @@ jobs:
             --include-data-files="hosts_editor/graphic/paypal_donate_button.png=graphic/paypal_donate_button.png" `
             --include-data-dir="hosts_editor/blocklists=blocklists" `
             --include-package=hosts_editor.remote `
+            --include-module=hosts_editor.compliance `
+            --include-module=hosts_editor.core_browser_policy `
+            --include-module=hosts_editor.core_dnslock `
             --include-package-data=certifi `
             --enable-plugin=pyside6 `
             --nofollow-import-to=PIL `

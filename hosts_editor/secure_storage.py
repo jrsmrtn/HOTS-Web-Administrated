@@ -56,3 +56,45 @@ def atomic_write_json(path: str, data) -> None:
         except OSError:
             pass
         raise
+
+
+# HKLM\Software\HOTS Hosts holds the app password hash. By default every local user can read
+# HKLM keys, which would let a child copy the hash and crack it offline: keep only SYSTEM and
+# Administrators. Two passes: first turn inherited entries into explicit ones, then purge.
+_PS_SECURE_KEY = r"""
+$ErrorActionPreference = 'Stop'
+$p = 'HKLM:\SOFTWARE\HOTS Hosts'
+if (-not (Test-Path -LiteralPath $p)) { 'MISSING'; exit 0 }
+$acl = Get-Acl -LiteralPath $p
+$acl.SetAccessRuleProtection($true, $true)
+Set-Acl -LiteralPath $p -AclObject $acl
+$acl = Get-Acl -LiteralPath $p
+foreach ($sid in 'S-1-5-32-545','S-1-5-11','S-1-1-0','S-1-15-2-1','S-1-15-2-2','S-1-3-0','S-1-5-12','S-1-5-4') {
+  $acl.PurgeAccessRules((New-Object System.Security.Principal.SecurityIdentifier($sid)))
+}
+foreach ($sid in 'S-1-5-18','S-1-5-32-544') {
+  $id = New-Object System.Security.Principal.SecurityIdentifier($sid)
+  $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+}
+Set-Acl -LiteralPath $p -AclObject $acl
+'OK'
+"""
+
+
+def secure_app_registry_key() -> bool:
+    """Restrict HKLM\\Software\\HOTS Hosts to SYSTEM + Administrators. Idempotent, best effort."""
+    if sys.platform != "win32":
+        return False
+    ps = os.path.join(_SYSTEM32, "WindowsPowerShell", "v1.0", "powershell.exe")
+    try:
+        r = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-Command", _PS_SECURE_KEY],
+                           capture_output=True, text=True, errors="replace", check=False,
+                           creationflags=_CREATE_NO_WINDOW, timeout=60)
+    except Exception as e:
+        logger.warning("secure_app_registry_key: %s", e)
+        return False
+    out = (r.stdout or "").strip().splitlines()
+    if r.returncode != 0 or not out or out[-1] not in ("OK", "MISSING"):
+        logger.warning("secure_app_registry_key failed: %s", (r.stderr or r.stdout).strip()[:300])
+        return False
+    return True

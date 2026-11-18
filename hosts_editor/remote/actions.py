@@ -266,21 +266,117 @@ def _custom_domains_set(p):
 
 @action("cf_family.set")
 def _cf_family_set(p):
-    from ..core import is_parental_active
     from ..dns_utils import enable_cf_family_dns, disable_cf_family_dns
     enabled = _bool(p, "enabled")
     if enabled:
-        # Same behaviour as the desktop app: the DNS filter supersedes the hosts "adult" list.
-        if is_parental_active("adult.txt"):
-            cat, path = _category("adult.txt")
-            _toggle_block(cat, path, False)
+        # The hosts "adult" list is kept on purpose: both filters stack (defence in depth).
         ok, failed = enable_cf_family_dns()
     else:
+        _dns_lock_off()  # otherwise the agent would put the filter back within minutes
         ok, failed = disable_cf_family_dns()
     if not ok:
         raise ActionError("La modification des serveurs DNS a échoué"
                           + (f" ({', '.join(failed)})." if failed else "."))
     return {"enabled": enabled, "failed_interfaces": failed}
+
+
+def _doh_hostlist(enabled: bool) -> None:
+    from ..core_dnslock import DOH_LIST
+    from ..parental_catalog import DOH_CATEGORY
+    from ..resource_utils import blocklists_dir
+    path = os.path.join(blocklists_dir(), DOH_LIST)
+    if enabled and not os.path.exists(path):
+        raise ActionError(f"Liste de blocage introuvable sur le PC : {DOH_LIST}")
+    _toggle_block(DOH_CATEGORY, path, enabled)
+
+
+def _dns_lock_off() -> None:
+    from ..core_dnslock import DnsLockManager
+    if DnsLockManager.is_active():
+        if not DnsLockManager.disable():
+            raise ActionError(DnsLockManager.last_error or "Impossible de déverrouiller le DNS.")
+        _doh_hostlist(False)
+
+
+@action("dns_lock.set")
+def _dns_lock_set(p):
+    from ..core_dnslock import DnsLockManager
+    enabled = _bool(p, "enabled")
+    if enabled:
+        if not DnsLockManager.enable():
+            raise ActionError(DnsLockManager.last_error or "Le verrouillage du DNS a échoué.")
+        _doh_hostlist(True)
+    else:
+        _dns_lock_off()
+    return {"enabled": enabled}
+
+
+@action("browser_policies.set")
+def _browser_policies_set(p):
+    from ..core_browser_policy import BrowserPolicyManager, LEVELS
+    level = _str(p, "level", 16)
+    if level not in LEVELS:
+        raise ActionError(f"Niveau inconnu : {level}")
+    safesites = p.get("safesites") is True
+    if not BrowserPolicyManager.apply(level, safesites):
+        raise ActionError(BrowserPolicyManager.last_error or "L'application des stratégies a échoué.")
+    return {"level": level, "safesites": safesites}
+
+
+# --- compliance / accounts -------------------------------------------------------------------------
+
+@action("compliance.check")
+def _compliance_check(p):
+    """Full check (several seconds). Marked as mutating so the fresh report is pushed with the state."""
+    from ..compliance import build_report
+    return build_report()
+
+
+def _sid(p: dict) -> str:
+    from ..compliance import SID_RE
+    sid = _str(p, "sid", 120)
+    if not SID_RE.match(sid):
+        raise ActionError("Identifiant de compte invalide.")
+    return sid
+
+
+@action("accounts.set_child")
+def _accounts_set_child(p):
+    from ..compliance import set_child
+    sid = _sid(p)
+    return {"children": set_child(sid, _bool(p, "is_child"))}
+
+
+@action("accounts.make_standard")
+def _accounts_make_standard(p):
+    from ..compliance import make_standard
+    try:
+        make_standard(_sid(p))
+    except (ValueError, RuntimeError) as e:
+        raise ActionError(str(e)) from None
+    return {"done": True, "note": "Effectif à la prochaine ouverture de session de ce compte."}
+
+
+@action("accounts.make_admin")
+def _accounts_make_admin(p):
+    from ..compliance import make_admin
+    try:
+        make_admin(_sid(p))
+    except (ValueError, RuntimeError) as e:
+        raise ActionError(str(e)) from None
+    return {"done": True}
+
+
+@action("protections.repair")
+def _protections_repair(p):
+    from ..compliance import repair_protections
+    return {"repaired": repair_protections()}
+
+
+@action("agent.set_options")
+def _agent_set_options(p):
+    from ..compliance import set_options
+    return set_options(auto_repair=_bool(p, "auto_repair"))
 
 
 # --- protections -----------------------------------------------------------------------------
@@ -729,13 +825,17 @@ def _uptime_seconds():
 def system_info() -> dict:
     from ..version import APP_VERSION
     from . import AGENT_VERSION
-    return {
+    info = {
         "hostname": socket.gethostname(),
         "os": windows_version(),
         "app_version": APP_VERSION,
         "agent_version": AGENT_VERSION,
         "machine_id": machine_id(),
     }
+    uptime = _uptime_seconds()
+    if uptime is not None:
+        info["last_boot"] = int((time.time() - uptime) // 60 * 60)  # minute precision: stable between polls
+    return info
 
 
 def _state_system():
@@ -770,10 +870,29 @@ def _state_parental():
     }
 
 
+def _state_dns():
+    """Family DNS filter + DNS lock, per adapter (IPv4 and IPv6)."""
+    from ..core_dnslock import DnsLockManager
+    return DnsLockManager.status(include_rules=False)
+
+
 def _state_cf():
-    from ..dns_utils import get_cf_status, format_dns_status
-    active, info = get_cf_status()
-    return {"active": bool(active), "details": format_dns_status(info)}
+    dns = _state_dns()
+    details = " · ".join(
+        f"{a['name']}: {'DHCP ' if a['dhcp'] else ''}{', '.join(a['v4'] + a['v6']) or '—'}" for a in dns["adapters"])
+    return {"active": dns["any_cf"], "complete": dns["all_ok"], "details": details,
+            "lock": {"active": dns["active"], "policy": dns["policy"], "adapters": dns["adapters"]}}
+
+
+def _state_browser_policies():
+    from ..core_browser_policy import BrowserPolicyManager
+    return BrowserPolicyManager.status()
+
+
+def _state_compliance():
+    from ..compliance import cached_report, options
+    report = cached_report()
+    return {"report": report, "options": options()}
 
 
 def _state_protections():
@@ -838,6 +957,8 @@ _SECTIONS = (
     ("system", _state_system),
     ("parental", _state_parental),
     ("cf_family", _state_cf),
+    ("browser_policies", _state_browser_policies),
+    ("compliance", _state_compliance),
     ("protections", _state_protections),
     ("apps", _state_apps),
     ("privacy", _state_privacy),

@@ -1844,7 +1844,17 @@ class HostsEditor(FramelessWindow):
         else:
             subprocess.Popen(["xdg-open", folder])
 
+    @staticmethod
+    def _hosts_file_sha() -> str:
+        import hashlib
+        try:
+            with open(HOSTS_PATH, "rb") as f:
+                return hashlib.sha256(f.read()).hexdigest()
+        except OSError:
+            return ""
+
     def _load(self):
+        self._loaded_sha = self._hosts_file_sha()
         self.entries = parse_hosts(HOSTS_PATH)
         self._refresh_table()
         self._update_status()
@@ -2090,6 +2100,15 @@ class HostsEditor(FramelessWindow):
             if not self._commit_raw_text():
                 return
 
+        # Changed elsewhere since it was loaded (remote console, another window): never overwrite blindly.
+        loaded_sha = getattr(self, "_loaded_sha", None)
+        if loaded_sha is not None and self._hosts_file_sha() != loaded_sha:
+            if HOTSDialog.ask(self, T("hosts_changed_title"), T("hosts_changed_msg")):
+                self._load()
+                if self._raw_mode:
+                    self._populate_raw_view()
+            return
+
         active_count = sum(1 for e in self.entries if e.get("enabled") is True)
         if active_count > MAX_ACTIVE_ENTRIES:
             HOTSDialog.error(self, T("save_limit_title"),
@@ -2134,6 +2153,7 @@ class HostsEditor(FramelessWindow):
         if not ok:
 
             return
+        self._loaded_sha = self._hosts_file_sha()
         self._mark_clean()
         self._update_status()
         InfoBanner.success(

@@ -101,7 +101,28 @@ CREATE TABLE IF NOT EXISTS events (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_account ON events(account_id, created_at);
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    device_id TEXT REFERENCES devices(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'warn',
+    message TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    resolved_at REAL,
+    emailed_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_open ON alerts(account_id, resolved_at);
 """
+
+# Columns added after the first release (ALTER TABLE on existing databases).
+MIGRATIONS = (
+    ("devices", "last_boot", "REAL"),
+    ("devices", "boots_json", "TEXT"),
+    ("devices", "alerts_muted_until", "REAL"),
+    ("accounts", "offline_alert_hours", "INTEGER NOT NULL DEFAULT 48"),
+    ("accounts", "email_alerts", "INTEGER NOT NULL DEFAULT 1"),
+)
 
 
 def connect() -> sqlite3.Connection:
@@ -135,8 +156,13 @@ def init() -> None:
     conn = get()
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
+    for table, column, decl in MIGRATIONS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
     if get_meta("schema_version") is None:
         set_meta("schema_version", "1")
+    set_meta("schema_version", "2")
     if get_meta("server_name") is None:
         set_meta("server_name", "Console HOTS Hosts")
     if get_meta("registration_open") is None:

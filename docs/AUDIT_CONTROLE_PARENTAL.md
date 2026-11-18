@@ -1,5 +1,26 @@
 # Audit de sécurité défensif — contrôle parental HOTS Hosts
 
+> **État au 18/11/2026 : phase 1 implémentée** (branche `claude/keen-volta-67zzct`).
+>
+> | Mesure | État | Où |
+> |---|---|---|
+> | P1.1 Bilan de conformité, comptes enfants, « Rendre standard » | ✅ | `hosts_editor/compliance.py`, onglet Sécurité |
+> | P1.2 Navigateurs verrouillés (standard / strict / SafeSites), restauration exacte, dérive | ✅ | `hosts_editor/core_browser_policy.py` |
+> | P1.3 DNS verrouillé : IPv4 + IPv6, stratégie `NameServer`, pare-feu 53/853, IP DoH, liste `doh_bypass.txt`, réapplication toutes les 2 min, liste « adultes » conservée | ✅ | `hosts_editor/core_dnslock.py` |
+> | P1.4 Mot de passe (ACL du registre, 8 car., migration de l'ancien hash), mutex de l'agent, verrou d'écriture inter-processus + rechargement GUI, auto-réparation, NAT64, applis par profil, refus de `http://` | ✅ | `secure_storage.py`, `core.py`, `app.py`, `remote/service.py`… |
+> | P1.5 Alertes (hors ligne, ré-enrôlement, Windows réinstallé, désinstallation, redémarrages, non-conformité), mode absence, e-mail SMTP | ✅ | `server/hots_server/alerts.py` |
+>
+> Testé sous Linux : 48 tests automatiques, plus un parcours navigateur complet avec un PC simulé.
+> Les points ci-dessous **restent à vérifier sur un vrai Windows** (protocoles §3.6) :
+>
+> - **T2** : prise en compte de la stratégie `NameServer` sur Windows **Famille** (couche de défense supplémentaire, sans effet si elle est ignorée) ;
+> - **T8/T9** : stratégies Chromium et `IPProtectionAvailable` (Firefox ≥ 149) ;
+> - comportement de `Remove-LocalGroupMember` avec un compte Microsoft ;
+> - temps d'exécution réel du bilan (PowerShell + parcours des dossiers).
+>
+> La « première ouverture » de l'application qui demanderait « Quel compte utilise votre enfant ? » n'est pas faite : le choix se fait dans la console (onglet Sécurité).
+
+
 *Date : 18/11/2026. Base : commit `467161a` (v2.5) + copie de travail en cours (agent `hosts_editor/remote/`). Les numéros de ligne renvoient à l'état du dépôt à cette date et peuvent bouger avec le développement en parallèle ; les noms de fonctions servent de repère stable.*
 
 *Modèle de menace : enfant curieux avec un compte Windows **standard**, accès physique au PC, clé USB, téléphone (partage de connexion), et Internet pour chercher des astuces. Cas secondaire : enfant **administrateur** du PC.*

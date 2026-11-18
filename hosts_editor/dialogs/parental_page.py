@@ -26,6 +26,22 @@ from ._doh_card import _DohBlockCardMixin
 from ._netblock_card import _NetBlockCardMixin
 
 
+
+def _disable_dns_lock():
+    """Turning the family DNS filter off also lifts the "DNS lock" set from the web console
+    (otherwise the remote agent would put the filter back a few minutes later)."""
+    try:
+        from ..core_dnslock import DnsLockManager, DOH_LIST
+        if DnsLockManager.is_active():
+            DnsLockManager.disable()
+            from ..resource_utils import blocklists_dir
+            from ..core_antispy import HostsLockManager
+            if not HostsLockManager.is_active():
+                import os as _os
+                toggle_parental_control(False, _os.path.join(blocklists_dir(), DOH_LIST), tag_suffix=DOH_LIST)
+    except Exception:
+        pass
+
 class _CfDnsToggleSignals(QObject):
     done = Signal(dict)
 
@@ -261,12 +277,7 @@ class ParentalPage(_ParentalCardMixin, _AppBlockCardMixin, _DohBlockCardMixin, _
             return
 
         if not self._cf_active:
-            adult_state = self._states.get("adult.txt")
-            if adult_state and adult_state["active"]:
-                if not self._confirm_overwrite_unsaved():
-                    return
-                self._run_cf_dns_toggle(enable=True, adult_state=adult_state)
-                return
+            # The hosts "adult" list is kept: both filters stack (defence in depth).
             self._run_cf_dns_toggle(enable=True)
         else:
             self._run_cf_dns_toggle(enable=False)
@@ -313,6 +324,7 @@ class ParentalPage(_ParentalCardMixin, _AppBlockCardMixin, _DohBlockCardMixin, _
                 if enable:
                     res["ok"], res["failed"] = enable_cf_family_dns()
                 else:
+                    _disable_dns_lock()
                     res["no_backup"] = not has_dns_backup()
                     res["ok"], res["failed"] = disable_cf_family_dns()
             except Exception:

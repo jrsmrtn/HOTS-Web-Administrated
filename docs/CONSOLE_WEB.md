@@ -153,7 +153,8 @@ protections actives. Cliquez un PC pour l'administrer :
 | Onglet | Ce que vous pouvez faire à distance |
 |---|---|
 | **Contrôle parental** | Bloquer 15 catégories (TikTok, YouTube, réseaux sociaux, adultes, jeux, rencontres…), filtre DNS familial Cloudflare, votre propre liste de sites bloqués. |
-| **Protections** | Verrouiller le fichier hosts, **couper Internet** (la console reste joignable pour le rétablir), bloquer les VPN, bloquer la restauration du système, bloquer le « DNS sécurisé » de chaque navigateur. |
+| **Sécurité** | **Score sur 100** et « 3 actions à faire » : compte enfant administrateur, protections annulées, navigateurs portables ou VPN trouvés dans les dossiers de l'enfant, extensions VPN, filtre DNS incomplet, UAC, Secure Boot, chiffrement… avec des boutons « Corriger ». Déclaration du ou des comptes enfants, passage en compte standard, auto-réparation. |
+| **Protections** | Verrouiller le fichier hosts, **couper Internet** (la console reste joignable pour le rétablir), bloquer les VPN, bloquer la restauration du système, bloquer le « DNS sécurisé » de chaque navigateur, **navigateurs verrouillés** et **DNS verrouillé** (voir ci-dessous). |
 | **Applications** | Bloquer n'importe quel programme, ou le choisir dans la liste des programmes installés ; suspendre / retirer un blocage. |
 | **Confidentialité** | Les 4 niveaux de réglages anti-télémétrie de Windows, réglage par réglage ; vérifier que Windows ne les a pas annulés ; créer un point de restauration. |
 | **Fichier hosts** | Tableau des entrées (recherche, ajout, modification, activation, suppression), édition en texte brut, sauvegardes et restauration. |
@@ -170,6 +171,52 @@ Bon à savoir :
   publicitaire, recherche Bing…) : ils s'affichent avec le badge « Session utilisateur » et se
   règlent dans l'application sur le PC.
 - La console s'utilise aussi sur **téléphone**, et suit le thème clair/sombre de l'appareil.
+
+### Renforcer la protection contre les contournements
+
+Ces fonctions répondent à l'audit [AUDIT_CONTROLE_PARENTAL.md](AUDIT_CONTROLE_PARENTAL.md) (phase 1).
+
+**Onglet Sécurité — le bilan.** Le PC fait un bilan toutes les 3 heures (bouton « Vérifier
+maintenant » pour le relancer, environ 10 s). Commencez par cocher **« Compte enfant »** pour le ou
+les comptes Windows de vos enfants : la console vérifie qu'ils ne sont pas administrateurs et
+propose **« Rendre standard »**. Garde-fou : refusé s'il ne reste aucun autre compte administrateur
+protégé par mot de passe. L'effet a lieu à la prochaine ouverture de session de l'enfant.
+L'**auto-réparation** (activée par défaut) rétablit toutes les 30 minutes une protection annulée
+(mise à jour Windows, manipulation) et le bilan la signale en rouge en attendant.
+
+**Navigateurs verrouillés** (onglet Protections). Trois niveaux pour Chrome, Edge, Brave, Vivaldi,
+Chromium et Firefox, y compris leurs copies portables ou installées dans le profil de l'enfant :
+
+| Niveau | Effet |
+|---|---|
+| Standard | extensions VPN/proxy bloquées, proxy interdit, SafeSearch Google et Bing, YouTube restreint (modéré), mode invité désactivé, Tor et VPN de Brave désactivés, VPN intégré de Firefox désactivé |
+| Strict | Standard + YouTube restreint strict + navigation privée désactivée (l'historique reste visible) |
+
+Les navigateurs affichent alors « Géré par votre organisation », pour **tous** les comptes du PC.
+Revenir à « Désactivé » restaure exactement les réglages d'avant. Opera, Opera GX et Tor Browser ne
+suivent pas ces stratégies : le bilan les **repère** dans les dossiers de l'enfant et propose de les
+bloquer.
+
+**DNS verrouillé** (onglet Protections). Force le filtre familial Cloudflare sur **toutes** les
+cartes réseau, en IPv4 et IPv6, y compris une carte qui apparaît plus tard (partage de connexion d'un
+téléphone, autre Wi-Fi : couverte en 2 minutes maximum). Il bloque aussi les autres serveurs DNS et
+les DNS chiffrés publics (Google, Cloudflare 1.1.1.1, Quad9, NextDNS, AdGuard…). À ne pas activer
+sur un PC professionnel. Le Wi-Fi d'un hôtel ou d'un train peut ne plus afficher sa page de
+connexion : désactivez le verrouillage avant un voyage. Désormais, la liste « adultes » du fichier
+hosts **reste active** avec le filtre DNS : les deux protections se cumulent.
+
+**Alertes.** Le tableau de bord et la page de chaque PC affichent les alertes :
+
+- PC hors ligne depuis trop longtemps (délai réglable dans **Mon compte → Alertes**, 48 h par
+  défaut) ;
+- PC relié de nouveau ou nouveau PC portant le même nom (Windows réinstallé ?) ;
+- HOTS Hosts désinstallé ;
+- au moins 6 redémarrages en 24 h ;
+- sécurité insuffisante (score < 60 ou problème grave).
+
+Elles peuvent être envoyées **par e-mail**, une fois que l'administrateur du serveur a configuré
+l'envoi (**Administration → Envoi d'e-mails**, avec un bouton d'e-mail de test). Vacances, PC rangé :
+le **mode absence** (onglet Outils du PC) suspend les alertes « hors ligne » jusqu'à la date choisie.
 
 ---
 
@@ -216,7 +263,7 @@ sudo /opt/hots-console/deploy.sh
 
 **Sur le PC**
 
-- L'agent n'exécute qu'une **liste fermée de 26 actions** (activer une catégorie, bloquer une
+- L'agent n'exécute qu'une **liste fermée de 34 actions** (activer une catégorie, bloquer une
   application, modifier une entrée hosts…). Il n'existe **aucune** commande « exécuter un
   programme » ou « écrire un fichier quelconque » : même un serveur compromis ne peut pas s'en
   servir pour prendre la main sur les PC.
@@ -237,6 +284,11 @@ sudo /opt/hots-console/deploy.sh
 - Le service tourne sous un utilisateur dédié sans privilèges, avec les protections systemd
   (`ProtectSystem=strict`, `NoNewPrivileges`…), derrière Caddy (HTTPS, HSTS).
 - Les codes d'ajout expirent (1 à 90 jours) et peuvent être révoqués.
+
+- Le mot de passe de l'application (8 caractères minimum) est stocké dans une clé de registre que
+  seuls SYSTÈME et les administrateurs peuvent lire : un compte enfant ne peut plus en copier
+  l'empreinte pour la casser. Le fichier hosts n'est jamais écrit en même temps par l'application
+  et par l'agent : l'application propose de recharger si le fichier a changé depuis la console.
 
 **Limites à connaître** : voir l'audit détaillé
 [AUDIT_CONTROLE_PARENTAL.md](AUDIT_CONTROLE_PARENTAL.md) (navigateurs portables, partage de

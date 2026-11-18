@@ -1,7 +1,8 @@
 """Logic run on uninstall.
 
 Anything that would otherwise leave the system broken (ACL lock on hosts, IFEO entries
-pointing at the removed .exe, locked app files, the program's own registry keys) is ALWAYS
+pointing at the removed .exe, locked app files, the program's own registry keys, the DNS lock
+firewall rules and the browser policies) is ALWAYS
 reverted, regardless of the wizard choices. Everything else (hosts block content, Anti-Spy
 privacy settings, hosts backups, saved config) is reverted ONLY if the user ticked it:
 uninstalling must not silently erase user decisions or changes the program does not own.
@@ -190,6 +191,21 @@ def apply_uninstall_choices(choices: dict) -> dict:
             report["errors"].append(f"netblock: {NetBlockManager.last_error}")
     except Exception as e:
         report["errors"].append(f"netblock: {e}")
+
+    # Owned by this program and harmful once it is gone (DNS firewall rules, browser banners):
+    # always reverted, like the Internet block.
+    try:
+        from .core_dnslock import DnsLockManager
+        if DnsLockManager.is_active() and not DnsLockManager.disable():
+            report["errors"].append(f"dns_lock: {DnsLockManager.last_error}")
+    except Exception as e:
+        report["errors"].append(f"dns_lock: {e}")
+    try:
+        from .core_browser_policy import BrowserPolicyManager
+        if BrowserPolicyManager.current()["level"] != "off" and not BrowserPolicyManager.apply("off"):
+            report["errors"].append(f"browser_policies: {BrowserPolicyManager.last_error}")
+    except Exception as e:
+        report["errors"].append(f"browser_policies: {e}")
 
     failed_apps = _remove_all_appblocks()
     if failed_apps:

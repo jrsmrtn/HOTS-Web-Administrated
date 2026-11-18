@@ -66,6 +66,8 @@ def _reg_set_password(hash_value: str) -> bool:
         if hash_value:
             with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, REG_KEY) as k:
                 winreg.SetValueEx(k, REG_VAL, 0, winreg.REG_SZ, hash_value)
+            from .secure_storage import secure_app_registry_key
+            secure_app_registry_key()  # the hash must not be readable by standard (child) accounts
         else:
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, REG_KEY,
                                 0, winreg.KEY_SET_VALUE) as k:

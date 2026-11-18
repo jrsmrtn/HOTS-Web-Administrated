@@ -75,6 +75,9 @@ const ICONS = {
   smile: '<circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/>',
   zap: '<path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>',
   mail: '<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><path d="M22 6l-10 7L2 6"/>',
+  shieldcheck: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/>',
+  bell: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
+  calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
 };
 
 function icon(name) {
@@ -596,19 +599,48 @@ function summaryBadges(sum) {
   if (sum.hosts_lock) out.push(badge('Hosts verrouillé', 'ok', 'lock'));
   if (sum.apps_blocked) out.push(badge(`${sum.apps_blocked} appli(s) bloquée(s)`, 'info', 'apps'));
   if (sum.privacy_total) out.push(badge(`Confidentialité ${sum.privacy_active}/${sum.privacy_total}`, sum.privacy_active ? 'ok' : '', 'eyeoff'));
+  if (sum.dns_lock) out.push(badge('DNS verrouillé', 'ok', 'lock'));
+  if (sum.browser_level && sum.browser_level !== 'off') out.push(badge('Navigateurs verrouillés', 'ok', 'browser'));
   return out;
+}
+
+function scoreKind(score) { return score == null ? '' : score >= 80 ? 'ok' : score >= 60 ? 'warn' : 'danger'; }
+
+function scoreBadge(score) {
+  return score == null ? null : badge(`Sécurité ${score}/100`, scoreKind(score), 'shieldcheck');
+}
+
+const ALERT_ICONS = { offline: 'clock', reboots: 'refresh', noncompliant: 'shieldcheck', reenrolled: 'alert', machine_changed: 'alert', uninstalled: 'trash' };
+
+/** Liste d'alertes avec bouton « Marquer comme lu » (seules les alertes ponctuelles s'acquittent). */
+function alertsCard(list, onChange, { showDevice = true } = {}) {
+  if (!list.length) return null;
+  return h('section', { class: 'card alerts-card' },
+    h('div', { class: 'card-head' }, h('div', { class: 'icon-badge danger' }, icon('bell')),
+      h('div', { class: 'spacer' }, h('h3', null, `Alertes (${list.length})`),
+        h('div', { class: 'muted small' }, 'Les alertes « hors ligne », « redémarrages » et « sécurité » disparaissent seules une fois le problème réglé.'))),
+    list.map((a) => h('div', { class: 'setting' },
+      h('div', { class: `icon-badge ${a.severity === 'danger' ? 'danger' : 'warn'}` }, icon(ALERT_ICONS[a.kind] || 'alert')),
+      h('div', { class: 'text' },
+        h('div', { class: 'title' }, showDevice && a.device_id ? h('a', { href: `#/pc/${a.device_id}` }, a.message) : a.message),
+        h('div', { class: 'desc' }, fmtAgo(a.created_at))),
+      btn('Marquer comme lu', { small: true, onclick: async () => { await api('POST', `/api/alerts/${a.id}/ack`); await onChange(); } }))));
 }
 
 async function viewDashboard(_m, token) {
   const main = shell('devices', h('div', { class: 'loading' }, h('span', { class: 'spinner' }), 'Chargement des PC…'));
   const listBox = h('div');
-  const paint = (devices) => {
+  const alertsBox = h('div');
+  const paint = (devices, alertList) => {
+    clear(alertsBox);
+    const card = alertsCard(alertList, load);
+    if (card) put(alertsBox, card, h('div', { style: { height: '16px' } }));
     put(clear(main), 
       h('div', { class: 'page-head' },
         h('div', null, h('h1', null, 'Mes PC'), h('p', { class: 'muted' },
           devices.length ? `${devices.filter((d) => d.online).length} en ligne sur ${devices.length}` : 'Ajoutez un PC pour commencer.')),
         btn('Ajouter un PC', { kind: 'primary', icon: 'plus', onclick: () => addDeviceDialog(devices.length) })),
-      listBox);
+      alertsBox, listBox);
     clear(listBox);
     if (!devices.length) {
       put(listBox, h('div', { class: 'empty' },
@@ -625,12 +657,13 @@ async function viewDashboard(_m, token) {
           h('div', { class: 'spacer' }, h('div', { class: 'name' }, d.name),
             h('div', { class: 'meta' }, statusText(d)),
             h('div', { class: 'meta' }, d.os || '')),
-          d.pending_commands ? badge(`${d.pending_commands} en attente`, 'warn', 'clock') : null),
-        h('div', { class: 'badges' }, summaryBadges(d.summary))))));
+          d.pending_commands ? badge(`${d.pending_commands} en attente`, 'warn', 'clock') : null,
+          d.open_alerts ? badge(`${d.open_alerts} alerte(s)`, 'danger', 'bell') : null),
+        h('div', { class: 'badges' }, scoreBadge(d.summary && d.summary.compliance_score), summaryBadges(d.summary))))));
   };
   const load = async () => {
-    const { devices } = await api('GET', '/api/devices');
-    if (token === S.navToken) paint(devices);
+    const [{ devices }, { alerts }] = await Promise.all([api('GET', '/api/devices'), api('GET', '/api/alerts')]);
+    if (token === S.navToken) paint(devices, alerts.filter((a) => !a.resolved_at));
   };
   await load();
   every(15000, () => load().catch(() => {}));
@@ -680,6 +713,7 @@ async function addDeviceDialog(knownCount) {
 
 const TABS = [
   ['parental', 'smile', 'Contrôle parental'],
+  ['security', 'shieldcheck', 'Sécurité'],
   ['protections', 'shield', 'Protections'],
   ['apps', 'apps', 'Applications'],
   ['privacy', 'eyeoff', 'Confidentialité'],
@@ -700,8 +734,14 @@ async function viewDevice([id, tab], token) {
   const headBox = h('div');
   const tabBox = h('div');
 
+  ctx.alerts = [];
+  ctx.loadAlerts = async () => {
+    const { alerts } = await api('GET', '/api/alerts');
+    ctx.alerts = alerts.filter((a) => a.device_id === id && !a.resolved_at);
+  };
   ctx.reload = async () => {
     ctx.device = await api('GET', `/api/devices/${id}`);
+    await ctx.loadAlerts();
     if (token !== S.navToken) return;
     paintHead();
     ctx.dirty = false;
@@ -756,6 +796,9 @@ async function viewDevice([id, tab], token) {
       !d.online && !d.uninstalled_at ? banner('warn', 'clock', h('p', null,
         'Ce PC est hors ligne (éteint ou sans Internet). Vous voyez son dernier état connu ',
         d.state_at ? `(${fmtAgo(d.state_at)})` : '', '. Les modifications seront appliquées à sa prochaine connexion.')) : null,
+      d.alerts_muted_until && d.alerts_muted_until > Date.now() / 1000 ? banner('info', 'calendar', h('p', null,
+        `Mode absence jusqu'au ${fmtDate(d.alerts_muted_until)} : pas d'alerte « hors ligne » pour ce PC.`)) : null,
+      alertsCard(ctx.alerts, async () => { await ctx.loadAlerts(); paintHead(); }, { showDevice: false }),
       h('nav', { class: 'tabs' }, TABS.map(([key, ic, label]) =>
         h('a', { href: `#/pc/${id}/${key}`, class: key === tab ? 'active' : null }, icon(ic), label))));
   }
@@ -776,6 +819,7 @@ async function viewDevice([id, tab], token) {
   }
 
   ctx.device = await api('GET', `/api/devices/${id}`);
+  await ctx.loadAlerts();
   if (token !== S.navToken) return;
   put(clear(main), headBox, tabBox);
   paintHead();
@@ -786,7 +830,9 @@ async function viewDevice([id, tab], token) {
       const fresh = await api('GET', `/api/devices/${id}`);
       if (token !== S.navToken) return;
       const stateChanged = fresh.state_at !== ctx.device.state_at;
-      const statusChanged = fresh.online !== ctx.device.online || fresh.pending_commands !== ctx.device.pending_commands;
+      const statusChanged = fresh.online !== ctx.device.online || fresh.pending_commands !== ctx.device.pending_commands
+        || fresh.open_alerts !== ctx.device.open_alerts;
+      if (fresh.open_alerts !== ctx.device.open_alerts) await ctx.loadAlerts();
       ctx.device = fresh;
       if (statusChanged || stateChanged) paintHead();
       if (stateChanged && !ctx.dirty && !['hosts', 'journal'].includes(tab)) await paintTab();
@@ -794,7 +840,7 @@ async function viewDevice([id, tab], token) {
   });
 }
 
-const READ_ONLY = new Set(['agent.ping', 'get_state', 'hosts.read', 'hosts.backups', 'apps.list_installed', 'privacy.check_drift']);
+const READ_ONLY = new Set(['agent.ping', 'get_state', 'hosts.read', 'hosts.backups', 'apps.list_installed', 'privacy.check_drift', 'compliance.check']);
 
 /* ---------- Onglet : contrôle parental ---------- */
 
@@ -822,12 +868,15 @@ function tabParental(ctx, box) {
     card(`Sites bloqués par catégorie — ${active}/${cats.length} actives`, 'smile',
       'Le blocage s\'applique à tout le PC (tous les navigateurs et applications), via le fichier hosts.', grid),
     card('Filtre DNS familial', 'shield', 'Cloudflare Family (1.1.1.3) : bloque les contenus pour adultes et les sites malveillants au niveau du réseau.',
-      settingRow(cf.active ? 'Activé' : 'Désactivé', cf.details ? `Serveurs DNS actuels : ${cf.details}` : null,
+      settingRow(cf.active ? (cf.complete === false ? 'Activé partiellement' : 'Activé') : 'Désactivé',
+        cf.details ? `Serveurs DNS actuels : ${cf.details}` : null,
         switchEl(!!cf.active, async (on) => {
-          if (on && !(await confirmDialog('Le filtre DNS remplace le blocage « adultes » du fichier hosts, qui sera désactivé. Continuer ?', { ok: 'Activer' }))) return false;
+          if (!on && cf.lock && cf.lock.active && !(await confirmDialog('Le DNS est verrouillé : le désactiver retire aussi le verrouillage. Continuer ?', { ok: 'Désactiver' }))) return false;
           const r = await ctx.exec('cf_family.set', { enabled: on }, `${on ? 'Activer' : 'Désactiver'} le filtre DNS familial`);
           return r && r.status === 'done';
-        }, { label: 'Filtre DNS familial' }))),
+        }, { label: 'Filtre DNS familial' })),
+      cf.active && cf.complete === false ? banner('warn', 'alert', h('p', null,
+        'Une carte réseau (IPv6, partage de connexion du téléphone…) n\'utilise pas le filtre. Activez « DNS verrouillé » dans l\'onglet Protections.')) : null),
     card('Mes sites bloqués', 'edit', 'Un domaine par ligne (les adresses complètes sont acceptées : https://exemple.com/page devient exemple.com).',
       settingRow(custom.active ? 'Blocage actif' : 'Blocage inactif', `${(custom.domains || []).length} domaine(s) dans la liste`,
         switchEl(!!custom.active, async (on) => {
@@ -861,7 +910,7 @@ function tabProtections(ctx, box) {
       return r && r.status === 'done';
     }, { label: b.name })));
 
-  put(box, h('div', { class: 'grid cols-2' },
+  put(box, h('div', { class: 'stack' }, h('div', { class: 'grid cols-2' },
     card('Protections du PC', 'shield', null,
       settingRow('Verrouiller le fichier hosts', 'Empêche toute modification des blocages en dehors de HOTS Hosts (par un enfant ou un logiciel malveillant). Les changements faits depuis cette console restent possibles.',
         sw('hosts_lock', 'hosts_lock.set', 'verrou du fichier hosts')),
@@ -873,7 +922,155 @@ function tabProtections(ctx, box) {
       settingRow(pr.netblock ? 'Internet est coupé' : 'Internet est accessible', null,
         sw('netblock', 'netblock.set', 'coupure d\'Internet', 'Couper l\'accès à Internet sur ce PC ? Vous pourrez le rétablir depuis cette console.')),
       pr.netblock ? banner('danger', 'wifioff', h('p', null, 'Internet est actuellement coupé sur ce PC.')) : null),
-    card('DNS sécurisé des navigateurs (DoH)', 'browser', 'Les navigateurs peuvent contourner le fichier hosts grâce au « DNS sécurisé ». Bloquez-le pour que les filtres s\'appliquent.', ...doh)));
+    card('DNS sécurisé des navigateurs (DoH)', 'browser', 'Les navigateurs peuvent contourner le fichier hosts grâce au « DNS sécurisé ». Bloquez-le pour que les filtres s\'appliquent.', ...doh)),
+    browserPolicyCard(ctx), dnsLockCard(ctx)));
+}
+
+const BROWSER_LEVELS = [
+  ['off', 'Désactivé', 'Les navigateurs ne sont pas verrouillés.'],
+  ['standard', 'Standard', 'Extensions VPN/proxy bloquées, proxy interdit, SafeSearch Google et Bing, YouTube restreint (modéré), mode invité désactivé, Tor et VPN de Brave désactivés, VPN intégré de Firefox désactivé.'],
+  ['strict', 'Strict', 'Standard + YouTube restreint strict + navigation privée (incognito / InPrivate) désactivée : l\'historique reste visible.'],
+];
+
+function browserPolicyCard(ctx) {
+  const bpState = ctx.device.state.browser_policies || { level: 'off', browsers: [], drift: 0 };
+  const safesites = h('input', { type: 'checkbox', checked: !!bpState.safesites });
+  const apply = async (level) => {
+    if (level !== 'off' && !(await confirmDialog('Les navigateurs afficheront « Géré par votre organisation ». Cela s\'applique à tous les comptes du PC (parents compris). Continuer ?', { ok: 'Verrouiller' }))) return;
+    const label = BROWSER_LEVELS.find((l) => l[0] === level)[1];
+    await ctx.exec('browser_policies.set', { level, safesites: safesites.checked }, `Navigateurs verrouillés : ${label}`);
+  };
+  const current = BROWSER_LEVELS.find((l) => l[0] === bpState.level) || BROWSER_LEVELS[0];
+  return card('Navigateurs verrouillés', 'browser', 'Chrome, Edge, Brave, Vivaldi, Chromium et Firefox — y compris leurs versions portables ou installées dans le profil de l\'enfant.',
+    h('div', { class: 'segmented', role: 'group', 'aria-label': 'Niveau de verrouillage' }, BROWSER_LEVELS.map(([key, label]) =>
+      h('button', { type: 'button', class: key === bpState.level ? 'active' : null, onclick: () => apply(key).catch(showError) }, label))),
+    h('p', { class: 'small muted', style: { 'margin-top': '10px' } }, current[2]),
+    h('label', { class: 'check-label small' }, safesites, h('span', null, 'Option : filtre « sites adultes » de Chrome (SafeSites). Il envoie les adresses visitées à Google pour classement ; prise en compte au prochain choix de niveau.')),
+    bpState.level !== 'off' ? h('div', { class: 'badges', style: { 'margin-top': '10px' } }, (bpState.browsers || []).map((b) =>
+      badge(b.ok ? b.name : `${b.name} : modifié`, b.ok ? 'ok' : 'danger', b.ok ? 'check' : 'alert'))) : null,
+    bpState.drift ? banner('danger', 'alert', h('p', null, 'Des réglages ont été modifiés sur le PC. Ils seront rétablis automatiquement (auto-réparation) ou depuis l\'onglet Sécurité.')) : null);
+}
+
+function dnsLockCard(ctx) {
+  const cf = ctx.device.state.cf_family || {};
+  const lock = cf.lock || { active: false, adapters: [] };
+  const rows = (lock.adapters || []).map((a) => h('tr', null,
+    h('td', null, a.name), h('td', { class: 'mono small' }, (a.v4 || []).join(', ') || '—'),
+    h('td', { class: 'mono small' }, (a.v6 || []).join(', ') || '—'),
+    h('td', null, a.ok ? badge('Filtré', 'ok', 'check') : badge('Non filtré', 'danger', 'alert'))));
+  return card('DNS verrouillé', 'lock', 'Force le filtre familial sur toutes les cartes réseau (IPv4 et IPv6, y compris le partage de connexion d\'un téléphone) et bloque les autres serveurs DNS et les DNS chiffrés publics (Google, Cloudflare 1.1.1.1, Quad9, NextDNS…).',
+    settingRow(lock.active ? 'Verrouillé' : 'Non verrouillé', lock.active ? 'Le PC réapplique le verrouillage toutes les 2 minutes.' : null,
+      switchEl(!!lock.active, async (on) => {
+        if (on && !(await confirmDialog('À éviter sur un PC professionnel (DNS d\'entreprise). Le Wi-Fi d\'un hôtel ou d\'un train peut ne plus afficher sa page de connexion : désactivez le verrouillage avant un voyage. Continuer ?', { ok: 'Verrouiller' }))) return false;
+        const r = await ctx.exec('dns_lock.set', { enabled: on }, `${on ? 'Verrouiller' : 'Déverrouiller'} le DNS`);
+        return r && r.status === 'done';
+      }, { label: 'DNS verrouillé' })),
+    rows.length ? h('div', { class: 'table-wrap' }, h('table', null,
+      h('thead', null, h('tr', null, h('th', null, 'Carte réseau'), h('th', null, 'DNS IPv4'), h('th', null, 'DNS IPv6'), h('th', null, ''))),
+      h('tbody', null, rows))) : null);
+}
+
+/* ---------- Onglet : sécurité (conformité) ---------- */
+
+const CHECK_STATUS = {
+  ok: ['OK', 'ok', 'check'], warn: ['À vérifier', 'warn', 'alert'], fail: ['Problème', 'danger', 'x'], unknown: ['Inconnu', '', 'info'],
+};
+const CATEGORY_ORDER = ['comptes', 'blocages', 'réseau', 'navigateurs', 'système', 'démarrage'];
+
+async function runFix(ctx, fix) {
+  if (!fix) return;
+  if (fix.action === 'accounts.make_standard' && !(await confirmDialog('Ce compte deviendra « utilisateur standard » à sa prochaine ouverture de session. Assurez-vous de connaître le mot de passe d\'un autre compte administrateur. Continuer ?', { ok: 'Rendre standard', danger: true }))) return;
+  const r = await ctx.exec(fix.action, fix.params || {}, fix.label || fix.action, { reload: false });
+  if (r && r.status === 'done') {
+    toast('Corrigé. Mise à jour du bilan de sécurité…', 'ok');
+    await ctx.exec('compliance.check', {}, 'Bilan de sécurité', { quiet: true });
+    await ctx.reload();
+  }
+}
+
+async function tabSecurity(ctx, box) {
+  const d = ctx.device;
+  const comp = (d.state && d.state.compliance) || {};
+  const report = comp.report;
+  const opts = comp.options || { auto_repair: true };
+  const check = btn('Vérifier maintenant', {
+    kind: 'primary', icon: 'search', disabled: !d.online, onclick: async () => {
+      const r = await ctx.exec('compliance.check', {}, 'Bilan de sécurité', { quiet: true });
+      if (r && r.status === 'done') { toast('Bilan de sécurité à jour', 'ok'); await ctx.reload(); }
+    },
+  });
+  const tools = card('Surveillance', 'shieldcheck', null,
+    settingRow('Auto-réparation', 'Si une protection est annulée (mise à jour Windows, manipulation), le PC la rétablit tout seul (vérification toutes les 30 minutes).',
+      switchEl(!!opts.auto_repair, async (on) => {
+        const r = await ctx.exec('agent.set_options', { auto_repair: on }, `${on ? 'Activer' : 'Désactiver'} l'auto-réparation`);
+        return r && r.status === 'done';
+      }, { label: 'Auto-réparation' })),
+    settingRow('Réparer maintenant', 'Rétablit immédiatement toutes les protections activées qui ne sont plus en place.',
+      btn('Réparer', {
+        icon: 'tool', onclick: async () => {
+          const r = await ctx.exec('protections.repair', {}, 'Réparation des protections', { quiet: true });
+          if (r && r.status === 'done') toast(r.result.repaired.length ? `Rétabli : ${r.result.repaired.join(', ')}` : 'Rien à réparer : tout est en place.', 'ok', 7000);
+        },
+      })));
+  if (!report) {
+    put(box, h('div', { class: 'stack' },
+      banner('info', 'shieldcheck', h('p', null, 'Aucun bilan de sécurité pour l\'instant. Le PC en fait un toutes les 3 heures ; vous pouvez le lancer maintenant (environ 10 secondes).')),
+      h('div', { class: 'row' }, check), tools));
+    return;
+  }
+  const kind = scoreKind(report.score);
+  const groups = {};
+  for (const c of report.checks || []) (groups[c.category] = groups[c.category] || []).push(c);
+  const cats = Object.keys(groups).sort((a, b) => CATEGORY_ORDER.indexOf(a) - CATEGORY_ORDER.indexOf(b));
+  const checkRow = (c) => {
+    const [label, k, ic] = CHECK_STATUS[c.status] || CHECK_STATUS.unknown;
+    return h('div', { class: 'setting check-row' },
+      h('div', { class: `status-dot ${k}`, title: label }, icon(ic)),
+      h('div', { class: 'text' }, h('div', { class: 'title' }, c.title), c.detail ? h('div', { class: 'desc' }, c.detail) : null,
+        c.items && c.items.length ? h('details', null, h('summary', null, `Détails (${c.items.length})`),
+          h('ul', { class: 'items' }, c.items.map((it) => h('li', null,
+            h('span', null, it.name || it.value || it.id || '', it.browser ? ` — ${it.browser}` : '', it.profile ? ` (${it.profile})` : ''),
+            it.path ? h('div', { class: 'mono small muted' }, it.path) : null,
+            it.fix ? btn(it.fix.label, { small: true, onclick: () => runFix(ctx, it.fix) }) : null)))) : null),
+      c.fix ? btn(c.fix.label, { small: true, kind: c.status === 'fail' ? 'primary' : null, onclick: () => runFix(ctx, c.fix) }) : null);
+  };
+  const accounts = (report.accounts || []).filter((a) => !a.builtin || a.enabled);
+  const accountRows = accounts.map((a) => h('tr', null,
+    h('td', null, h('strong', null, a.full_name || a.name), a.full_name ? h('div', { class: 'small muted' }, a.name) : null),
+    h('td', null, a.admin ? badge('Administrateur', a.child ? 'danger' : 'warn') : badge('Standard', 'ok'),
+      a.source === 'MicrosoftAccount' ? badge('Compte Microsoft', 'info') : null, !a.enabled ? badge('Désactivé', '') : null),
+    h('td', { class: 'small' }, a.last_logon ? fmtAgo(Date.parse(a.last_logon) / 1000) : '—'),
+    h('td', null, a.builtin ? null : switchEl(!!a.child, async (on) => {
+      const r = await ctx.exec('accounts.set_child', { sid: a.sid, is_child: on }, `${on ? 'Marquer' : 'Ne plus marquer'} ${a.name} comme compte enfant`, { reload: false });
+      if (r && r.status === 'done') { await ctx.exec('compliance.check', {}, 'Bilan de sécurité', { quiet: true }); await ctx.reload(); }
+      return false;
+    }, { label: `Compte enfant : ${a.name}` })),
+    h('td', { class: 'actions' },
+      a.child && a.admin ? btn('Rendre standard', { small: true, kind: 'danger', onclick: () => runFix(ctx, { action: 'accounts.make_standard', params: { sid: a.sid }, label: `Rendre ${a.name} standard` }) }) : null,
+      a.child && !a.admin ? btn('Rendre administrateur', {
+        small: true, onclick: async () => {
+          if (await confirmDialog(`Redonner les droits administrateur à ${a.name} ? Il pourrait alors désactiver les protections.`, { ok: 'Rendre administrateur', danger: true })) {
+            await runFix(ctx, { action: 'accounts.make_admin', params: { sid: a.sid }, label: `Rendre ${a.name} administrateur` });
+          }
+        },
+      }) : null)));
+  put(box, h('div', { class: 'stack' },
+    h('div', { class: 'grid cols-2' },
+      h('section', { class: 'card score-card' },
+        h('div', { class: `score ${kind}` }, h('div', { class: 'value' }, String(report.score)), h('div', { class: 'of' }, '/100')),
+        h('div', null, h('h3', null, kind === 'ok' ? 'Bonne protection' : kind === 'warn' ? 'Protection à améliorer' : 'Protection insuffisante'),
+          h('p', { class: 'muted small' }, `Bilan ${fmtAgo(report.checked_at)}${report.duration_s != null ? ` (${report.duration_s} s)` : ''}`),
+          check)),
+      h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('div', { class: 'icon-badge warn' }, icon('list')), h('h3', null, 'À faire en priorité')),
+        report.todo && report.todo.length ? h('ol', { class: 'todo' }, report.todo.map((t) => h('li', null, h('span', null, t.title),
+          t.fix ? btn(t.fix.label, { small: true, kind: 'primary', onclick: () => runFix(ctx, t.fix) }) : null)))
+          : h('p', { class: 'muted' }, 'Rien à signaler 🎉'))),
+    card('Comptes Windows du PC', 'users', 'Cochez le ou les comptes utilisés par vos enfants : un compte enfant ne doit jamais être administrateur.',
+      accountRows.length ? h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, h('th', null, 'Compte'), h('th', null, 'Type'), h('th', null, 'Dernière connexion'), h('th', null, 'Compte enfant'), h('th', null, ''))),
+        h('tbody', null, accountRows))) : h('p', { class: 'muted' }, 'Liste des comptes indisponible.')),
+    ...cats.map((cat) => card(cat.charAt(0).toUpperCase() + cat.slice(1), null, null, groups[cat].map(checkRow))),
+    tools));
 }
 
 /* ---------- Onglet : applications ---------- */
@@ -1146,6 +1343,7 @@ function tabTools(ctx, box) {
             await ctx.reload();
           },
         }))),
+      absenceCard(ctx),
       card('Actions rapides', 'zap', null,
         settingRow('Vider le cache DNS', 'Applique immédiatement les changements de blocage dans les navigateurs ouverts.',
           btn('Vider', { icon: 'zap', onclick: () => ctx.exec('dns.flush', {}, 'Vidage du cache DNS') })),
@@ -1160,6 +1358,26 @@ function tabTools(ctx, box) {
             go('#/');
           },
         }))))));
+}
+
+function absenceCard(ctx) {
+  const d = ctx.device;
+  const active = d.alerts_muted_until && d.alerts_muted_until > Date.now() / 1000;
+  const date = h('input', { type: 'date', min: new Date(Date.now() + 86400000).toISOString().slice(0, 10) });
+  const save = async (until) => {
+    await api('PATCH', `/api/devices/${d.id}`, { alerts_muted_until: until });
+    toast(until ? 'Mode absence activé' : 'Mode absence désactivé', 'ok');
+    await ctx.reload();
+  };
+  return card('Mode absence', 'calendar', 'Vacances, PC rangé… Pas d\'alerte « hors ligne » ni « redémarrages » pour ce PC jusqu\'à la date choisie.',
+    active ? settingRow(`Actif jusqu'au ${fmtDate(d.alerts_muted_until)}`, null, btn('Désactiver', { onclick: () => save(null) }))
+      : h('div', { class: 'inline-form' }, field('Jusqu\'au', date),
+        btn('Activer', {
+          kind: 'primary', onclick: async () => {
+            if (!date.value) return toast('Choisissez une date.', 'error');
+            await save(Math.floor(new Date(`${date.value}T23:59:00`).getTime() / 1000));
+          },
+        })));
 }
 
 /* ---------- Onglet : journal ---------- */
@@ -1183,7 +1401,7 @@ async function tabJournal(ctx, box) {
 }
 
 const TAB_RENDERERS = {
-  parental: tabParental, protections: tabProtections, apps: tabApps, privacy: tabPrivacy,
+  parental: tabParental, security: tabSecurity, protections: tabProtections, apps: tabApps, privacy: tabPrivacy,
   hosts: tabHosts, tools: tabTools, journal: tabJournal,
 };
 
@@ -1191,7 +1409,7 @@ const TAB_RENDERERS = {
 
 async function viewAccount(_m, token) {
   const main = shell('account', h('div', { class: 'loading' }, h('span', { class: 'spinner' })));
-  const [acc, codes, events] = await Promise.all([api('GET', '/api/account/users'), api('GET', '/api/enroll-codes'), api('GET', '/api/events')]);
+  const [acc, codes, events, alertConf] = await Promise.all([api('GET', '/api/account/users'), api('GET', '/api/enroll-codes'), api('GET', '/api/events'), api('GET', '/api/account/settings')]);
   if (token !== S.navToken) return;
   const u = S.boot.user;
   const isOwner = u.role === 'owner' || u.is_superadmin;
@@ -1246,6 +1464,8 @@ async function viewAccount(_m, token) {
           },
         })))),
     h('div', { style: { height: '16px' } }),
+    alertSettingsCard(alertConf, isOwner),
+    h('div', { style: { height: '16px' } }),
     card('Personnes ayant accès à ce compte', 'users', 'Par exemple l\'autre parent : chacun a son identifiant et voit les mêmes PC.',
       usersTable,
       isOwner ? h('div', { class: 'row end', style: { 'margin-top': '12px' } }, btn('Ajouter une personne', {
@@ -1290,6 +1510,19 @@ async function viewAccount(_m, token) {
           h('td', { class: 'nowrap small', title: fmtDate(ev.created_at) }, fmtAgo(ev.created_at)),
           h('td', null, ev.message), h('td', { class: 'small muted' }, ev.user || ev.device || '—'), h('td', { class: 'small muted mono' }, ev.ip || '—'))))))
         : h('p', { class: 'muted' }, 'Aucun événement.')));
+}
+
+function alertSettingsCard(conf, isOwner) {
+  const hours = h('select', { disabled: !isOwner }, [[0, 'Jamais'], [12, 'Après 12 heures'], [24, 'Après 24 heures'], [48, 'Après 2 jours'], [72, 'Après 3 jours'], [168, 'Après 7 jours']]
+    .map(([v, l]) => h('option', { value: String(v), selected: v === conf.offline_alert_hours }, l)));
+  hours.addEventListener('change', async () => {
+    try { await api('PATCH', '/api/account/settings', { offline_alert_hours: Number(hours.value) }); toast('Réglage enregistré', 'ok'); } catch (e) { showError(e); }
+  });
+  return card('Alertes', 'bell', 'PC hors ligne trop longtemps, PC réinstallé ou désinstallé, redémarrages répétés, protection insuffisante.',
+    field('Alerter quand un PC est hors ligne', hours, isOwner ? 'Le mode absence d\'un PC (onglet Outils) suspend cette alerte.' : 'Modifiable par le responsable du compte.'),
+    settingRow('Recevoir les alertes par e-mail', conf.smtp_configured ? 'Envoyées à toutes les personnes ayant accès à ce compte.' : 'L\'administrateur du serveur doit d\'abord configurer l\'envoi d\'e-mails.',
+      switchEl(conf.email_alerts, async (on) => { await api('PATCH', '/api/account/settings', { email_alerts: on }); toast('Réglage enregistré', 'ok'); return true; },
+        { disabled: !isOwner, label: 'Alertes par e-mail' })));
 }
 
 /* ============================== Administration du serveur ============================== */
@@ -1397,7 +1630,38 @@ async function viewAdmin(_m, token) {
           S.boot = null; toast('Réglages enregistrés', 'ok'); render();
         },
       })),
-      h('p', { class: 'muted small' }, `Version du serveur : ${conf.version}`)));
+      h('p', { class: 'muted small' }, `Version du serveur : ${conf.version}`)),
+    h('div', { style: { height: '16px' } }),
+    smtpCard(conf.smtp || {}));
+}
+
+function smtpCard(smtp) {
+  const f = {
+    smtp_host: h('input', { type: 'text', value: smtp.smtp_host || '', placeholder: 'smtp.exemple.fr' }),
+    smtp_port: h('input', { type: 'number', value: smtp.smtp_port || '', placeholder: '587' }),
+    smtp_security: h('select', null, [['starttls', 'STARTTLS (port 587)'], ['ssl', 'SSL/TLS (port 465)'], ['none', 'Aucune (déconseillé)']]
+      .map(([v, l]) => h('option', { value: v, selected: v === (smtp.smtp_security || 'starttls') }, l))),
+    smtp_user: h('input', { type: 'text', value: smtp.smtp_user || '', autocomplete: 'off' }),
+    smtp_password: h('input', { type: 'password', placeholder: smtp.password_set ? '•••••••• (inchangé)' : '', autocomplete: 'new-password' }),
+    smtp_from: h('input', { type: 'email', value: smtp.smtp_from || '', placeholder: 'console@exemple.fr' }),
+  };
+  return card('Envoi d\'e-mails (alertes)', 'mail', 'Serveur SMTP de votre hébergeur ou de votre messagerie, utilisé pour envoyer les alertes aux clients.',
+    h('div', { class: 'grid cols-2' }, field('Serveur SMTP', f.smtp_host), field('Port', f.smtp_port), field('Sécurité', f.smtp_security),
+      field('Expéditeur', f.smtp_from), field('Identifiant', f.smtp_user), field('Mot de passe', f.smtp_password)),
+    h('div', { class: 'row end' },
+      btn('Envoyer un e-mail de test', {
+        icon: 'mail', onclick: async () => { const r = await api('POST', '/api/admin/test-email'); toast(`E-mail de test envoyé à ${r.to}`, 'ok'); },
+      }),
+      btn('Enregistrer', {
+        kind: 'primary', onclick: async () => {
+          const body = {};
+          for (const [k, el] of Object.entries(f)) body[k] = el.value.trim();
+          body.smtp_port = body.smtp_port ? Number(body.smtp_port) : null;
+          if (!body.smtp_password) delete body.smtp_password;
+          await api('PATCH', '/api/admin/settings', { smtp: body });
+          toast('Configuration e-mail enregistrée', 'ok');
+        },
+      })));
 }
 
 /* ============================== Démarrage ============================== */

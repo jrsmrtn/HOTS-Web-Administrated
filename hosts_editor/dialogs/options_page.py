@@ -399,6 +399,11 @@ class OptionsPage(HOTSPage):
         row.addWidget(self._pw_remove)
         v.addLayout(row)
 
+        hint = QLabel(T("pwd_reuse_hint"))
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {DARK['fg2']}; font-size: 8pt; background: transparent; border: none;")
+        v.addWidget(hint)
+
         self._pw_rep.returnPressed.connect(self._save_password)
         return panel
 
@@ -442,7 +447,7 @@ class OptionsPage(HOTSPage):
         if not new_val:
             self._password_error("pwd_err_empty", focus=self._pw_new)
             return
-        if len(new_val) < 4:
+        if len(new_val) < 8:
             self._password_error("pwd_err_too_short", focus=self._pw_new)
             return
         if new_val != self._pw_rep.text():

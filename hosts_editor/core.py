@@ -17,7 +17,6 @@ from .bg_tasks import start_bg_timer
 
 MAX_ACTIVE_ENTRIES = 20000
 
-_HOSTS_FILE_LOCK = threading.Lock()
 
 _MIN_WRITE_GAP = 0.35
 _last_write_ts = 0.0
@@ -48,6 +47,110 @@ class HostsLimitExceeded(Exception):
 
 class HostsBusyError(Exception):
     pass
+
+
+class _HostsWriteLock:
+    """Serialises hosts-file writes across threads AND processes (desktop app + remote agent).
+
+    Thread lock + named mutex Global\\HOTS_Hosts_Write that only SYSTEM/Administrators may open.
+    A mutex pre-created by a standard (child) account is ignored (owner check), so it can never
+    be used to block writes; in that case, or off Windows, only the thread lock is used.
+    """
+
+    _NAME = "Global\\HOTS_Hosts_Write"
+    _WAIT_MS = 30000
+
+    def __init__(self):
+        self._thread_lock = threading.Lock()
+        self._handle = None
+        self._initialised = False
+        self._owned = False
+
+    def _mutex(self):
+        if self._initialised:
+            return self._handle
+        self._initialised = True
+        if os.name != "nt":
+            return None
+        try:
+            import ctypes
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            adv = ctypes.WinDLL("advapi32", use_last_error=True)
+            k32.CreateMutexW.restype = ctypes.c_void_p
+            k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+            k32.CloseHandle.argtypes = [ctypes.c_void_p]
+            k32.LocalFree.restype = ctypes.c_void_p
+            k32.LocalFree.argtypes = [ctypes.c_void_p]
+            k32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            k32.WaitForSingleObject.restype = ctypes.c_ulong
+            k32.ReleaseMutex.argtypes = [ctypes.c_void_p]
+            adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+                ctypes.c_wchar_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+            adv.GetSecurityInfo.restype = ctypes.c_ulong
+            adv.GetSecurityInfo.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ulong,
+                                            ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_void_p,
+                                            ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+            adv.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+
+            class _SA(ctypes.Structure):
+                _fields_ = [("nLength", ctypes.c_ulong), ("lpSecurityDescriptor", ctypes.c_void_p),
+                            ("bInheritHandle", ctypes.c_int)]
+
+            sd = ctypes.c_void_p()
+            sa = None
+            if adv.ConvertStringSecurityDescriptorToSecurityDescriptorW("D:(A;;GA;;;SY)(A;;GA;;;BA)", 1,
+                                                                         ctypes.byref(sd), None):
+                sa = _SA(ctypes.sizeof(_SA), sd, 0)
+            handle = k32.CreateMutexW(ctypes.byref(sa) if sa else None, False, self._NAME)
+            existed = ctypes.get_last_error() == 183
+            if sd:
+                k32.LocalFree(sd)
+            if not handle:
+                return None
+            if existed:
+                owner, desc, sid_text = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_wchar_p()
+                trusted = False
+                if adv.GetSecurityInfo(handle, 6, 1, ctypes.byref(owner), None, None, None, ctypes.byref(desc)) == 0:
+                    if owner and adv.ConvertSidToStringSidW(owner, ctypes.byref(sid_text)):
+                        trusted = sid_text.value in ("S-1-5-18", "S-1-5-32-544")
+                        k32.LocalFree(ctypes.cast(sid_text, ctypes.c_void_p))
+                    k32.LocalFree(desc)
+                if not trusted:
+                    k32.CloseHandle(handle)
+                    return None
+            self._k32 = k32
+            self._handle = handle
+        except Exception:
+            self._handle = None
+        return self._handle
+
+    def __enter__(self):
+        self._thread_lock.acquire()
+        self._owned = False
+        try:
+            handle = self._mutex()
+            if handle:
+                result = self._k32.WaitForSingleObject(handle, self._WAIT_MS)
+                if result in (0, 0x80):  # WAIT_OBJECT_0, WAIT_ABANDONED: we own it
+                    self._owned = True
+                else:
+                    raise HostsBusyError(T("hosts_busy_msg"))
+        except BaseException:
+            self._thread_lock.release()
+            raise
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if self._owned and self._handle:
+                self._k32.ReleaseMutex(self._handle)
+        finally:
+            self._owned = False
+            self._thread_lock.release()
+        return False
+
+
+_HOSTS_FILE_LOCK = _HostsWriteLock()
 
 def is_valid_ip(ip: str) -> bool:
     ip = ip.strip()
@@ -544,9 +647,10 @@ def export_to_path(path: str, entries: list, include_comments: bool = True):
 
 def has_internet_connection(timeout: float = 2.5) -> bool:
     targets = [
+        ("1.1.1.3", 53),   # Cloudflare Family first: still reachable when the DNS lock is on
         ("1.1.1.1", 53),
         ("8.8.8.8", 53),
-        ("1.0.0.1", 53),
+        ("1.0.0.3", 53),
     ]
     for host, port in targets:
         try:
@@ -557,6 +661,14 @@ def has_internet_connection(timeout: float = 2.5) -> bool:
     return False
 
 def dns_lookup_external(hostname, dns_ip="8.8.8.8", port=53, timeout=4):
+    result = _dns_lookup_external(hostname, dns_ip, port, timeout)
+    if result is None and dns_ip != "1.1.1.3":
+        # Public resolvers are blocked by the DNS lock: Cloudflare Family stays reachable.
+        result = _dns_lookup_external(hostname, "1.1.1.3", port, timeout)
+    return result
+
+
+def _dns_lookup_external(hostname, dns_ip="8.8.8.8", port=53, timeout=4):
     import struct as _st
     import random as _r
     try:

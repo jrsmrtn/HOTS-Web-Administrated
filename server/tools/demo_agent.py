@@ -19,6 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 sys.modules.setdefault("winreg", types.ModuleType("winreg"))  # catalogs only, nothing touches the registry
 
+from hosts_editor import compliance  # noqa: E402
 from hosts_editor.core import _parse_line  # noqa: E402
 from hosts_editor.core_antispy import ITEMS  # noqa: E402
 from hosts_editor.core_doh import BROWSERS  # noqa: E402
@@ -56,10 +57,68 @@ class DemoPC:
         self.privacy = {it["id"]: it["level"] == "basic" and it["kind"] != "hkcu_reg" for it in ITEMS}
         self.hosts = HOSTS_HEADER.splitlines()
         self.backups = [("hosts.bak_20261115_201500", "2026-11-15T20:15:00", 1210)]
+        self.browser_level, self.safesites = "off", False
+        self.dns_lock = False
+        self.auto_repair = True
+        self.children = []
+        self.accounts = [
+            {"name": "Julie", "full_name": "Julie Martin", "sid": "S-1-5-21-10-20-30-1001", "enabled": True,
+             "source": "MicrosoftAccount", "admin": True},
+            {"name": "Lea", "full_name": "Léa", "sid": "S-1-5-21-10-20-30-1002", "enabled": True,
+             "source": "Local", "admin": True, "password_last_set": "2026-09-01T10:00:00"},
+            {"name": "Administrateur", "full_name": "", "sid": "S-1-5-21-10-20-30-500", "enabled": False,
+             "source": "Local", "admin": True},
+        ]
+        self.hosts_lock_undone = True
+        self.report = None
+        self.boot = time.time() - 3 * 3600
+
+    def _adapters(self):
+        cf = self.cf or self.dns_lock
+        wifi_v4 = ["1.1.1.3", "1.0.0.3"] if cf else ["192.168.1.1"]
+        wifi_v6 = ["2606:4700:4700::1113", "2606:4700:4700::1003"] if self.dns_lock else ["2a01:cb00:12::1"]
+        phone_v4 = ["1.1.1.3", "1.0.0.3"] if self.dns_lock else ["192.168.42.129"]
+        return [
+            {"name": "Wi-Fi", "dhcp": not cf, "v4": wifi_v4, "v6": wifi_v6, "ok": cf and self.dns_lock},
+            {"name": "Ethernet 2 (partage de connexion du téléphone)", "dhcp": not self.dns_lock, "v4": phone_v4,
+             "v6": [], "ok": self.dns_lock},
+        ]
+
+    def _compliance(self):
+        users = [dict(a, password_last_set=a.get("password_last_set") or ("2026-01-01T00:00:00" if a["name"] == "Julie" else None))
+                 for a in self.accounts]
+        adapters = self._adapters()
+        data = {
+            "children": list(self.children),
+            "windows": {"admins": [a["sid"] for a in self.accounts if a["admin"]], "users": users, "bitlocker": 1,
+                        "features": {"Microsoft-Windows-Subsystem-Linux": 0}},
+            "registry": {"EnableLUA": 1, "PromptOnSecureDesktop": 1, "SecureBoot": 1,
+                         "DataBasePath": r"%SystemRoot%\System32\drivers\etc"},
+            "observed": {
+                "hosts_lock": {"wanted": True, "real": not self.hosts_lock_undone, "drift": self.hosts_lock_undone},
+                "browsers": {"wanted": self.browser_level, "drift": False},
+                "dns": {"wanted": self.dns_lock, "all_ok": all(a["ok"] for a in adapters),
+                        "any_cf": self.cf or self.dns_lock, "adapters": adapters},
+            },
+            "unmanaged": [] if any(a["exe_name"] == "opera.exe" for a in self.apps) else [
+                {"profile": "Lea", "name": "Opera / Opera GX (VPN intégré)", "kind": "browser", "exe": "opera.exe",
+                 "path": r"C:\Users\Lea\AppData\Local\Programs\Opera\opera.exe"}],
+            "proxy_extensions": [{"profile": "Lea", "browser": "Google Chrome", "id": "bihmplhobchoageeokmgbdihknkjbknd",
+                                  "name": "Touch VPN", "required": True}],
+        }
+        checks = compliance.evaluate(data)
+        score, todo = compliance.score(checks)
+        accounts = [{"sid": a["sid"], "name": a["name"], "full_name": a["full_name"], "enabled": a["enabled"],
+                     "admin": a["admin"], "child": a["sid"] in self.children, "builtin": a["sid"].endswith("-500"),
+                     "source": a["source"], "last_logon": "2026-11-18T08:12:00"} for a in self.accounts]
+        self.report = {"score": score, "todo": todo, "checks": checks, "accounts": accounts, "errors": {},
+                       "checked_at": time.time(), "duration_s": 8.4}
+        return self.report
 
     def info(self):
         return {"hostname": self.hostname, "os": "Windows 11 Famille 24H2 (build 26100.2314)",
-                "app_version": "2.5.1", "agent_version": AGENT_VERSION, "machine_id": "demo-" + self.hostname}
+                "app_version": "2.5.1", "agent_version": AGENT_VERSION, "machine_id": "demo-" + self.hostname,
+                "last_boot": int(self.boot)}
 
     def state(self, lang="fr"):
         set_lang(lang)
@@ -76,7 +135,14 @@ class DemoPC:
                                   "active": self.telemetry},
                     "custom": {"file": "custom_domains.txt", "active": self.custom_active, "domains": list(self.custom)},
                 },
-                "cf_family": {"active": self.cf, "details": "Wi-Fi: " + ("1.1.1.3, 1.0.0.3" if self.cf else "DHCP (192.168.1.1)")},
+                "cf_family": {"active": self.cf or self.dns_lock, "complete": all(a["ok"] for a in self._adapters()),
+                              "details": " · ".join(f"{a['name']}: {', '.join(a['v4'] + a['v6'])}" for a in self._adapters()),
+                              "lock": {"active": self.dns_lock, "policy": self.dns_lock, "adapters": self._adapters()}},
+                "browser_policies": {"level": self.browser_level, "safesites": self.safesites, "drift": 0,
+                                     "browsers": [{"id": b, "name": n, "ok": True, "drift": []} for b, n in (
+                                         ("chrome", "Google Chrome"), ("edge", "Microsoft Edge"), ("brave", "Brave"),
+                                         ("vivaldi", "Vivaldi"), ("chromium", "Chromium"), ("firefox", "Mozilla Firefox"))]},
+                "compliance": {"report": self.report, "options": {"auto_repair": self.auto_repair}},
                 "protections": dict(self.prot, doh=[{"id": b["id"], "name": b["name"], "installed": b["id"] != "vivaldi",
                                                      "blocked": self.doh[b["id"]]} for b in BROWSERS]),
                 "apps": [dict(a) for a in self.apps],
@@ -130,9 +196,39 @@ class DemoPC:
             return ok({"count": len(valid)})
         if action == "cf_family.set":
             self.cf = p["enabled"]
-            if self.cf:
-                self.cats["adult.txt"] = False
+            if not self.cf:
+                self.dns_lock = False
             return ok()
+        if action == "dns_lock.set":
+            self.dns_lock = p["enabled"]
+            self.cf = self.cf or self.dns_lock
+            return ok()
+        if action == "browser_policies.set":
+            if p["level"] not in ("off", "standard", "strict"):
+                return False, None, f"Niveau inconnu : {p['level']}", True
+            self.browser_level, self.safesites = p["level"], p.get("safesites") is True
+            return ok()
+        if action == "compliance.check":
+            time.sleep(1.5)
+            return ok(self._compliance())
+        if action == "accounts.set_child":
+            sid = p["sid"]
+            self.children = [c for c in self.children if c != sid] + ([sid] if p["is_child"] else [])
+            return ok({"children": self.children})
+        if action in ("accounts.make_standard", "accounts.make_admin"):
+            if action == "accounts.make_standard" and p["sid"] not in self.children:
+                return False, None, "Marquez d'abord ce compte comme « compte enfant ».", True
+            for a in self.accounts:
+                if a["sid"] == p["sid"]:
+                    a["admin"] = action == "accounts.make_admin"
+            return ok({"done": True})
+        if action == "protections.repair":
+            repaired = ["verrou du fichier hosts"] if self.hosts_lock_undone else []
+            self.hosts_lock_undone = False
+            return ok({"repaired": repaired})
+        if action == "agent.set_options":
+            self.auto_repair = p["auto_repair"]
+            return ok({"auto_repair": self.auto_repair})
         if action in ("hosts_lock.set", "netblock.set", "vpn.set", "rstrui_lock.set"):
             key = {"hosts_lock.set": "hosts_lock", "netblock.set": "netblock", "vpn.set": "vpn", "rstrui_lock.set": "rstrui"}[action]
             self.prot[key] = p["enabled"]

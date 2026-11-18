@@ -233,8 +233,15 @@ def _state_builder(lang: str) -> dict:
         return actions.build_state()
 
 
-def periodic_checks(agent) -> None:
-    """Keep the console server reachable when the Internet block is on, and re-apply it if lost."""
+COMPLIANCE_EVERY = 3 * 3600
+_last_compliance = 0.0
+
+
+def periodic_checks(agent) -> bool:
+    """Every 30 min: keep the console reachable through the Internet block, auto-repair undone
+    protections (if enabled from the console), refresh the compliance report every 3 h."""
+    global _last_compliance
+    changed = False
     ips = agent.transport.resolve_server_ips()
     if ips and config.update_server_ips(ips):
         log.info("console server IPs changed: %s", ", ".join(ips))
@@ -242,10 +249,30 @@ def periodic_checks(agent) -> None:
     if NetBlockManager.exclusions_outdated():
         log.info("re-applying the Internet block with the current server exclusions")
         NetBlockManager.enable()
+        changed = True
+    from .. import compliance
+    if compliance.options()["auto_repair"]:
+        repaired = compliance.repair_protections()
+        if repaired:
+            config.write_status(last_repair={"at": time.time(), "items": repaired})
+            changed = True
     else:
         drift = NetBlockManager.check_drift()
         if drift:
             log.info("Internet block drift: %s", drift)
+    if time.monotonic() - _last_compliance >= COMPLIANCE_EVERY or not compliance.cached_report():
+        _last_compliance = time.monotonic()
+        compliance.build_report()
+        changed = True
+    return changed
+
+
+def fast_checks(agent) -> bool:
+    """Every 2 min: the DNS lock covers adapters that just appeared (USB tethering, new Wi-Fi)."""
+    from ..core_dnslock import DnsLockManager
+    if not DnsLockManager.is_active():
+        return False
+    return bool(DnsLockManager.reapply())
 
 
 def run_agent() -> int:
@@ -267,6 +294,11 @@ def run_agent() -> int:
         run_startup_seed()
     except Exception:
         log.exception("privacy cache seeding failed")
+    try:
+        from ..secure_storage import secure_app_registry_key
+        secure_app_registry_key()  # app password hash: not readable by standard accounts
+    except Exception:
+        log.exception("could not secure the app registry key")
     while True:
         cfg = config.load()
         if not cfg:
@@ -274,7 +306,7 @@ def run_agent() -> int:
             config.write_status(connected=False)
             return EXIT_OK
         agent = Agent(cfg, executor=actions.execute, state_builder=_state_builder,
-                      info_builder=actions.system_info, periodic=periodic_checks)
+                      info_builder=actions.system_info, periodic=periodic_checks, periodic_fast=fast_checks)
         try:
             agent.run()
         except Exception:

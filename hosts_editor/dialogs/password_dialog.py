@@ -86,5 +86,16 @@ class PasswordPromptDialog(HOTSDialog):
             self._entry.setFocus()
             return
         
+        self._upgrade_legacy_hash(val)
         super().accept()
         QTimer.singleShot(0, self._on_success)
+
+    def _upgrade_legacy_hash(self, password: str):
+        # Old versions stored a plain SHA-256: replace it with PBKDF2 now that we know the password.
+        try:
+            from ..password_utils import needs_upgrade, hash_password
+            if needs_upgrade(self._cur_hash):
+                from ..__main__ import _reg_set_password
+                _reg_set_password(hash_password(password))
+        except Exception:
+            pass

@@ -14,7 +14,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import __version__, db, security, settings
+from . import __version__, alerts, db, security, settings
 
 log = logging.getLogger("hots_server")
 
@@ -51,9 +51,17 @@ ACTIONS = {
     "hosts.save_text": True,
     "hosts.restore_backup": True,
     "dns.flush": True,
+    "dns_lock.set": True,
+    "browser_policies.set": True,
+    "compliance.check": True,
+    "accounts.set_child": True,
+    "accounts.make_standard": True,
+    "accounts.make_admin": True,
+    "protections.repair": True,
+    "agent.set_options": True,
 }
 # Large read-only results are dropped from the history after a day.
-BULKY_RESULTS = ("get_state", "hosts.read", "apps.list_installed", "hosts.backups")
+BULKY_RESULTS = ("get_state", "hosts.read", "apps.list_installed", "hosts.backups", "compliance.check")
 TERMINAL = ("done", "error", "expired", "cancelled")
 
 SENT_TIMEOUT = 15 * 60
@@ -172,6 +180,10 @@ def summarize_state(state) -> dict:
         "apps_blocked": sum(1 for a in state.get("apps") or [] if a.get("enabled")),
         "privacy_active": sum(1 for it in privacy_items if it.get("active")),
         "privacy_total": len(privacy_items),
+        "cf_complete": bool((state.get("cf_family") or {}).get("complete")),
+        "dns_lock": bool(((state.get("cf_family") or {}).get("lock") or {}).get("active")),
+        "browser_level": (state.get("browser_policies") or {}).get("level") or "off",
+        "compliance_score": (((state.get("compliance") or {}).get("report") or {}).get("score")),
         "errors": len(state.get("errors") or {}),
     }
 
@@ -186,6 +198,9 @@ def device_public(row, with_state: bool = False) -> dict:
         "enrolled_at": row["enrolled_at"], "last_seen": row["last_seen"], "last_ip": row["last_ip"],
         "online": is_online(row), "uninstalled_at": row["uninstalled_at"], "notes": row["notes"],
         "state_at": row["state_at"], "summary": summarize_state(state), "pending_commands": pending,
+        "last_boot": row["last_boot"], "alerts_muted_until": row["alerts_muted_until"],
+        "open_alerts": db.q1("SELECT COUNT(*) AS n FROM alerts WHERE device_id = ? AND resolved_at IS NULL",
+                             (row["id"],))["n"],
     }
     if with_state:
         out["state"] = state
@@ -282,6 +297,10 @@ def own_device(user, device_id: str):
 
 async def bootstrap(request: Request):
     user = current_user(request, required=False)
+    if user and user["is_superadmin"]:
+        base = str(request.base_url).rstrip("/")
+        if base.startswith("https://") and db.get_meta("public_url") != base:
+            db.set_meta("public_url", base)
     has_users = db.q1("SELECT 1 FROM users LIMIT 1") is not None
     out = dict(settings_public())
     out["setup_required"] = not has_users
@@ -467,7 +486,15 @@ async def patch_device(request: Request):
     data = await read_json(request)
     name = s(data, "name", 80, required=False, default=row["name"])
     notes = s(data, "notes", 2000, required=False, default=row["notes"]) if "notes" in data else row["notes"]
-    db.ex("UPDATE devices SET name = ?, notes = ? WHERE id = ?", (name, notes, row["id"]))
+    muted = row["alerts_muted_until"]
+    if "alerts_muted_until" in data:
+        muted = data["alerts_muted_until"]
+        if muted is not None and (isinstance(muted, bool) or not isinstance(muted, (int, float))
+                                  or not time.time() < muted < time.time() + 366 * 86400):
+            raise ApiError(400, "Date de fin d'absence invalide (dans l'année à venir).")
+        if muted:
+            alerts.resolve(row["id"], "offline")
+    db.ex("UPDATE devices SET name = ?, notes = ?, alerts_muted_until = ? WHERE id = ?", (name, notes, muted, row["id"]))
     return JSONResponse({"ok": True})
 
 
@@ -660,6 +687,44 @@ async def list_events(request: Request):
          "user": r["user_email"] or "", "device": r["device_name"] or ""} for r in rows]})
 
 
+# --- alerts --------------------------------------------------------------------------------------------
+
+async def list_alerts(request: Request):
+    user = current_user(request)
+    rows = db.q("SELECT al.*, d.name AS device_name FROM alerts al LEFT JOIN devices d ON d.id = al.device_id "
+                "WHERE al.account_id = ? AND (al.resolved_at IS NULL OR al.resolved_at > ?) "
+                "ORDER BY al.resolved_at IS NOT NULL, al.id DESC LIMIT 200",
+                (user["account_id"], time.time() - 7 * 86400))
+    return JSONResponse({"alerts": [alerts.public(r, r["device_name"] or "") for r in rows]})
+
+
+async def ack_alert(request: Request):
+    user = current_user(request)
+    cur = db.ex("UPDATE alerts SET resolved_at = ? WHERE id = ? AND account_id = ? AND resolved_at IS NULL",
+                (time.time(), request.path_params["alert_id"], user["account_id"]))
+    if not cur.rowcount:
+        raise ApiError(404, "Alerte introuvable ou déjà traitée.")
+    return JSONResponse({"ok": True})
+
+
+async def account_settings(request: Request):
+    user = current_user(request)
+    if request.method == "PATCH":
+        require_owner(user)
+        data = await read_json(request)
+        if "offline_alert_hours" in data:
+            hours = data["offline_alert_hours"]
+            if isinstance(hours, bool) or not isinstance(hours, int) or not 0 <= hours <= 24 * 30:
+                raise ApiError(400, "Délai d'alerte invalide.")
+            db.ex("UPDATE accounts SET offline_alert_hours = ? WHERE id = ?", (hours, user["account_id"]))
+        if "email_alerts" in data:
+            db.ex("UPDATE accounts SET email_alerts = ? WHERE id = ?",
+                  (1 if data["email_alerts"] is True else 0, user["account_id"]))
+    row = db.q1("SELECT offline_alert_hours, email_alerts FROM accounts WHERE id = ?", (user["account_id"],))
+    return JSONResponse({"offline_alert_hours": row["offline_alert_hours"], "email_alerts": bool(row["email_alerts"]),
+                         "smtp_configured": alerts.smtp_configured()})
+
+
 # --- server administration (superadmin) ----------------------------------------------------------------
 
 async def admin_accounts(request: Request):
@@ -772,7 +837,35 @@ async def admin_settings(request: Request):
             if url and not url.startswith("https://"):
                 raise ApiError(400, "Le lien de téléchargement doit commencer par https://")
             db.set_meta("download_url", url or None)
-    return JSONResponse(settings_public())
+        smtp = data.get("smtp")
+        if isinstance(smtp, dict):
+            for key in ("smtp_host", "smtp_user", "smtp_from"):
+                if key in smtp:
+                    db.set_meta(key, s(smtp, key, 200, required=False) or None)
+            if "smtp_port" in smtp:
+                port = smtp["smtp_port"]
+                if port not in (None, "") and (isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536):
+                    raise ApiError(400, "Port SMTP invalide.")
+                db.set_meta("smtp_port", port or None)
+            if smtp.get("smtp_security") in ("starttls", "ssl", "none"):
+                db.set_meta("smtp_security", smtp["smtp_security"])
+            if isinstance(smtp.get("smtp_password"), str) and smtp["smtp_password"]:
+                db.set_meta("smtp_password", smtp["smtp_password"][:300])
+    out = settings_public()
+    conf = alerts.smtp_settings()
+    out["smtp"] = {k: v for k, v in conf.items() if k != "smtp_password"}
+    out["smtp"]["password_set"] = bool(conf["smtp_password"])
+    return JSONResponse(out)
+
+
+async def admin_test_email(request: Request):
+    admin = require_superadmin(request)
+    try:
+        await asyncio.to_thread(alerts.send_mail, [admin["email"]], "[HOTS] E-mail de test",
+                                "Ceci est un e-mail de test de la console HOTS Hosts : l'envoi fonctionne.")
+    except Exception as e:
+        raise ApiError(400, f"Échec de l'envoi : {e}")
+    return JSONResponse({"ok": True, "to": admin["email"]})
 
 
 # --- agent API -------------------------------------------------------------------------------------------
@@ -805,8 +898,10 @@ def _store_info_and_state(device, data: dict, ip: str) -> None:
         fields["state_at"] = time.time()
     if device["uninstalled_at"]:
         fields["uninstalled_at"] = None
+        alerts.resolve(device["id"], "uninstalled")
     sets = ", ".join(f"{k} = ?" for k in fields)
     db.ex(f"UPDATE devices SET {sets} WHERE id = ?", (*fields.values(), device["id"]))
+    alerts.record_boot(device, info.get("last_boot"))
 
 
 def _store_results(device, results) -> None:
@@ -880,6 +975,8 @@ async def agent_enroll(request: Request):
                   (security.token_hash(token), hostname, info["os"], info["agent_version"], info["app_version"],
                    now, device_id))
             message = f"PC reconnecté : {existing['name']}"
+            alerts.open_alert(row["account_id"], device_id, "reenrolled",
+                              f"{existing['name']} a été relié de nouveau à la console (réinstallation ?)")
         else:
             device_id = security.new_device_id()
             label = row["label"].strip()
@@ -889,6 +986,12 @@ async def agent_enroll(request: Request):
                   (device_id, row["account_id"], security.token_hash(token), name, hostname, info["os"], machine_id,
                    info["agent_version"], info["app_version"], now, ip))
             message = f"Nouveau PC ajouté : {hostname}"
+            twin = db.q1("SELECT name FROM devices WHERE account_id = ? AND hostname = ? AND id != ? AND machine_id != ?",
+                         (row["account_id"], hostname, device_id, machine_id))
+            if twin:
+                alerts.open_alert(row["account_id"], device_id, "machine_changed",
+                                  f"{hostname} : nouveau PC portant le nom de « {twin['name']} » "
+                                  "(Windows réinstallé ?)")
         db.ex("UPDATE enroll_codes SET uses = uses + 1 WHERE id = ?", (row["id"],))
         db.log_event("device_enrolled", message, row["account_id"], device_id=device_id, ip=ip)
     return JSONResponse({"device_id": device_id, "token": token, "account_name": row["account_name"],
@@ -937,6 +1040,8 @@ async def agent_goodbye(request: Request):
           (time.time(), device["id"]))
     db.log_event("device_uninstalled", f"HOTS Hosts désinstallé de {device['name']}", device["account_id"],
                  device_id=device["id"], ip=client_ip(request))
+    alerts.open_alert(device["account_id"], device["id"], "uninstalled",
+                      f"HOTS Hosts a été désinstallé de {device['name']}", severity="danger")
     return JSONResponse({"ok": True})
 
 
@@ -967,10 +1072,21 @@ def maintenance_once() -> None:
     db.ex("DELETE FROM sessions WHERE expires_at < ?", (now,))
 
 
+async def send_alert_emails() -> None:
+    for ids, to, subject, body in alerts.pending_emails():
+        try:
+            await asyncio.to_thread(alerts.send_mail, to, subject, body)
+            alerts.mark_emailed(ids)
+        except Exception as e:
+            log.warning("alert e-mail failed: %s", e)
+
+
 async def _maintenance_loop():
     while True:
         try:
             maintenance_once()
+            alerts.evaluate(settings.ONLINE_GRACE_SECONDS)
+            await send_alert_emails()
         except Exception:
             log.exception("maintenance failed")
         await asyncio.sleep(60)
@@ -1087,6 +1203,10 @@ routes = [
     Route("/api/account/users", add_account_user, methods=["POST"]),
     Route(f"/api/account/users/{_int_path('user_id')}", delete_account_user, methods=["DELETE"]),
     Route("/api/events", list_events),
+    Route("/api/alerts", list_alerts),
+    Route(f"/api/alerts/{_int_path('alert_id')}/ack", ack_alert, methods=["POST"]),
+    Route("/api/account/settings", account_settings, methods=["GET", "PATCH"]),
+    Route("/api/admin/test-email", admin_test_email, methods=["POST"]),
     Route("/api/admin/accounts", admin_accounts),
     Route("/api/admin/accounts", admin_create_account, methods=["POST"]),
     Route(f"/api/admin/accounts/{_int_path('account_id')}", admin_patch_account, methods=["PATCH"]),

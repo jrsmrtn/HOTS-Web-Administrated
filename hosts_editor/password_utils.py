@@ -29,3 +29,8 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return hmac.compare_digest(hashlib.sha256(pw).hexdigest(), stored_hash)
     except Exception:
         return False
+
+
+def needs_upgrade(stored_hash: str) -> bool:
+    """True for the old plain SHA-256 format: re-hash it with PBKDF2 after a successful login."""
+    return bool(stored_hash) and not stored_hash.startswith(_PREFIX + "$")

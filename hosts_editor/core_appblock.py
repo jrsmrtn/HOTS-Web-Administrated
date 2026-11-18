@@ -28,6 +28,22 @@ _UNINSTALL_ROOTS = [
     (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
 ]
 
+def _uninstall_roots() -> list:
+    """Machine-wide keys + the per-user keys of every loaded profile: the agent runs as SYSTEM,
+    so HKEY_CURRENT_USER would only show SYSTEM's own programs, not the child's (Roblox, Discord...)."""
+    roots = list(_UNINSTALL_ROOTS)
+    try:
+        i = 0
+        while True:
+            sid = winreg.EnumKey(winreg.HKEY_USERS, i)
+            i += 1
+            if sid.startswith("S-1-5-21-") and not sid.endswith("_Classes"):
+                roots.append((winreg.HKEY_USERS, sid + r"\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"))
+    except OSError:
+        pass
+    return roots
+
+
 KNOWN_VPN_EXES = [
     "nordvpn.exe", "expressvpn.exe", "protonvpn.exe", "openvpn-gui.exe",
     "tunnelbear.exe", "windscribe.exe", "surfshark.exe", "hotspotshield.exe",
@@ -117,7 +133,7 @@ class AppBlockManager:
     @classmethod
     def list_installed_programs(cls) -> list:
         results = {}
-        for hive, subkey in _UNINSTALL_ROOTS:
+        for hive, subkey in _uninstall_roots():
             try:
                 root = winreg.OpenKey(hive, subkey)
             except OSError:

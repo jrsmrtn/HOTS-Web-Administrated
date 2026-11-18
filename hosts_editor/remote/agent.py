@@ -24,7 +24,8 @@ GOODBYE_PATH = "/api/agent/goodbye"
 
 POLL_TIMEOUT = 70            # server holds the request up to ~25 s
 STATE_REFRESH = 15 * 60      # periodic full state upload
-PERIODIC_CHECKS = 30 * 60    # netblock exclusions / drift checks
+PERIODIC_CHECKS = 30 * 60    # netblock exclusions, auto-repair, compliance
+FAST_CHECKS = 120            # DNS lock: cover new adapters (phone tethering...) quickly
 MAX_BACKOFF = 120
 
 
@@ -72,18 +73,21 @@ def goodbye(cfg: dict) -> None:
 
 class Agent:
     def __init__(self, cfg: dict, executor, state_builder, info_builder, periodic=None,
-                 stop_event: threading.Event = None, lang: str = "fr"):
+                 stop_event: threading.Event = None, lang: str = "fr", periodic_fast=None):
         """
         executor(action, params, lang) -> (ok, result, error, mutating)
         state_builder(lang) -> dict
         info_builder() -> dict  (hostname, os, versions...)
-        periodic(agent) -> None  (called every PERIODIC_CHECKS seconds from the worker thread)
+        periodic(agent) -> bool  (every PERIODIC_CHECKS s, worker thread; True = state changed)
+        periodic_fast(agent) -> bool  (every FAST_CHECKS s)
         """
         self.cfg = cfg
         self.executor = executor
         self.state_builder = state_builder
         self.info_builder = info_builder
         self.periodic = periodic
+        self.periodic_fast = periodic_fast
+        self._last_fast = 0.0
         self.stop_event = stop_event or threading.Event()
         self.lang = lang
         self.transport = Transport(cfg["server_url"], auth=f"{cfg['device_id']}.{cfg['token']}",
@@ -161,10 +165,18 @@ class Agent:
 
     def _maybe_periodic(self):
         now = time.monotonic()
+        if self.periodic_fast and now - self._last_fast >= FAST_CHECKS:
+            self._last_fast = now
+            try:
+                if self.periodic_fast(self):
+                    self._state_due = True
+            except Exception:
+                log.exception("fast periodic checks failed")
         if self.periodic and now - self._last_periodic >= PERIODIC_CHECKS:
             self._last_periodic = now
             try:
-                self.periodic(self)
+                if self.periodic(self):
+                    self._state_due = True
             except Exception:
                 log.exception("periodic checks failed")
         if now - self._last_state >= STATE_REFRESH:
