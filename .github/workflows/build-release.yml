@@ -1,6 +1,6 @@
 name: Build and Release
 
-# Push a tag such as v2.5.1 to publish a release with:
+# Push a tag such as v2.6.0 (or a commit with [release] in its message) to publish a release with:
 #   - HOTS_Hosts_setup.exe            Windows installer (desktop app + remote-administration agent)
 #   - HOTS_Console_Server.zip         web console for an Ubuntu server (deploy.sh inside, VERSION file)
 #   - SHA256SUMS.txt
@@ -9,6 +9,11 @@ on:
   push:
     tags:
       - 'v*'
+    # A commit whose message contains [release] publishes version.py's version (tag created by the
+    # workflow). Any other push to these branches is ignored by this workflow (only CI runs).
+    branches:
+      - main
+      - 'claude/**'
   workflow_dispatch:
     inputs:
       version:
@@ -16,27 +21,40 @@ on:
         required: false
         default: ""
 
-env:
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version != '' && format('v{0}', inputs.version) || github.ref_name }}
-  PUBLISH: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.version != '') }}
-
 jobs:
   versions:
+    if: >-
+      startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '[release]')
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      publish: ${{ steps.tag.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
-      - name: Check that the tag matches the program version
-        if: env.PUBLISH == 'true'
+      - name: Work out the release tag and check it matches the program version
+        id: tag
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          tag="${RELEASE_TAG#v}"
           app=$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' hosts_editor/version.py)
           iss=$(sed -n 's/^#define MyAppVersion "\(.*\)"/\1/p' setup.iss)
-          echo "tag=$tag app=$app installer=$iss"
-          if [ "$tag" != "$app" ] || [ "$tag" != "$iss" ]; then
-            echo "::error::Tag v$tag must match hosts_editor/version.py ($app) and setup.iss ($iss)"
+          publish=true
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="$GITHUB_REF_NAME"
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -n "$INPUT_VERSION" ]; then tag="v$INPUT_VERSION"; else tag="v$app"; publish=false; fi
+          else
+            tag="v$app"
+          fi
+          echo "tag=$tag app=$app installer=$iss publish=$publish"
+          if [ "${tag#v}" != "$app" ] || [ "${tag#v}" != "$iss" ]; then
+            echo "::error::Tag $tag must match hosts_editor/version.py ($app) and setup.iss ($iss)"
             exit 1
           fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
   windows-installer:
     needs: versions
@@ -125,11 +143,20 @@ jobs:
           name="HOTS_Console_Server"
           mkdir -p "build/$name"
           cp -r server/hots_server server/requirements.txt server/README.md LICENSE.txt "build/$name/"
-          cp server/deploy/deploy.sh "build/$name/deploy.sh"
-          chmod +x "build/$name/deploy.sh"
-          echo "${RELEASE_TAG}" > "build/$name/VERSION"
+          cp server/deploy/deploy.sh server/deploy/install-mutualise.sh "build/$name/"
+          chmod +x "build/$name/deploy.sh" "build/$name/install-mutualise.sh"
+          # Pure-Python libraries for shared hosting (no pip / no root there): Python 3.11+ on any OS.
+          python -m pip install --target "build/$name/vendor" --only-binary=:all: --python-version 3.11 \
+            --implementation py --abi none --platform any -r server/requirements.txt
+          rm -rf "build/$name/vendor/bin"
+          echo "${{ needs.versions.outputs.tag }}" > "build/$name/VERSION"
           find "build/$name" -name '__pycache__' -prune -exec rm -rf {} +
           (cd build && zip -qr "$name.zip" "$name")
+          # Smoke test of the no-root installer (shared hosting), from the packaged folder.
+          bash "build/$name/install-mutualise.sh" --yes --no-cron --no-htaccess --domain console.example.org \
+            --dir "$RUNNER_TEMP/hots-console"
+          "$RUNNER_TEMP/hots-console/hots" status
+          "$RUNNER_TEMP/hots-console/hots" stop
           ls -la build
 
       - name: Upload server package
@@ -139,9 +166,9 @@ jobs:
           path: build/*.zip
 
   release:
-    needs: [windows-installer, console-server]
+    needs: [versions, windows-installer, console-server]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+    if: needs.versions.outputs.publish == 'true'
     permissions:
       contents: write
     steps:
@@ -159,8 +186,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: HOTS Hosts ${{ env.RELEASE_TAG }}
+          tag_name: ${{ needs.versions.outputs.tag }}
+          name: HOTS Hosts ${{ needs.versions.outputs.tag }}
           target_commitish: ${{ github.sha }}
           files: |
             assets/*.exe
@@ -174,4 +201,4 @@ jobs:
             | 💻 Le PC à protéger (Windows 10/11) | **HOTS_Hosts_setup.exe** |
             | 🌐 Votre serveur de console (Ubuntu) | **HOTS_Console_Server.zip** — dézippez puis `sudo ./deploy.sh` |
 
-            Guide d'installation de la console : [docs/CONSOLE_WEB.md](https://github.com/${{ github.repository }}/blob/${{ env.RELEASE_TAG }}/docs/CONSOLE_WEB.md)
+            Guide d'installation de la console : [docs/CONSOLE_WEB.md](https://github.com/${{ github.repository }}/blob/${{ needs.versions.outputs.tag }}/docs/CONSOLE_WEB.md)

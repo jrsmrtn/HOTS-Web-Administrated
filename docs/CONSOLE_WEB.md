@@ -27,7 +27,7 @@ flowchart LR
 
 ## Sommaire
 
-1. [Installer le serveur (10 minutes)](#1-installer-le-serveur-10-minutes)
+1. [Installer le serveur (10 minutes)](#1-installer-le-serveur-10-minutes) — VPS Ubuntu, ou [hébergement mutualisé / Virtualmin sans root](#variante--hébergement-mutualisé-ou-serveur-virtuel-virtualmin-sans-root)
 2. [Premier lancement : créer le compte administrateur](#2-premier-lancement--créer-le-compte-administrateur)
 3. [Ajouter un PC](#3-ajouter-un-pc)
 4. [Utiliser la console](#4-utiliser-la-console)
@@ -94,6 +94,70 @@ sudo ./deploy.sh --sslip --yes
 
 Le lien de configuration est affiché à la fin, et à tout moment avec `sudo hots-server setup-link`.
 </details>
+
+### Variante : hébergement mutualisé ou serveur virtuel Virtualmin (sans root)
+
+Vous n'avez pas d'accès `sudo` ni `apt`, seulement un compte d'hébergement (serveur virtuel
+Virtualmin/Webmin, ou un hébergement mutualisé avec accès SSH) : utilisez
+**`install-mutualise.sh`**, inclus dans le même zip. Tout s'installe dans `~/hots-console` et
+fonctionne avec votre propre utilisateur.
+
+| Il faut | Détail |
+|---|---|
+| Un accès **SSH** (ou le terminal du panneau) | Webmin : **Outils → Ligne de commande / Terminal**. |
+| Un domaine ou sous-domaine **dédié** à la console | Ex. `console.mondomaine.fr`, créé comme serveur virtuel (ou sous-serveur) avec son site web. Tout le site est relayé vers la console. |
+| **Python 3.11+** | Déjà présent sur Debian 12, Ubuntu 24.04, AlmaLinux 10… Sinon le script télécharge un Python privé (≈ 30 Mo) dans `~/hots-console`, si le serveur peut accéder à Internet. |
+| Apache avec les modules **proxy** et **proxy_http** | Activés par défaut avec Virtualmin. Sinon : relais configuré dans le panneau (voir plus bas). |
+| Des **processus permanents** autorisés | La console tourne en continu (comme un petit service). Certains mutualisés bas de gamme l'interdisent. |
+
+1. Dans Virtualmin, créez le serveur virtuel (ou sous-serveur) `console.mondomaine.fr` avec son
+   site web, puis activez **HTTPS** : **Paramètres du serveur → Certificat SSL → Let's Encrypt**.
+2. Envoyez `HOTS_Console_Server.zip` dans votre dossier personnel (SSH, SFTP ou le gestionnaire
+   de fichiers), puis dans le terminal :
+
+```bash
+unzip HOTS_Console_Server.zip && cd HOTS_Console_Server
+```
+
+```bash
+bash install-mutualise.sh
+```
+
+3. Le script demande l'adresse de la console et le dossier web du domaine (il les devine le plus
+   souvent : appuyez sur Entrée). Il installe ensuite :
+   - l'application dans `~/hots-console` (bibliothèques incluses dans le zip : pas de `pip`) ;
+   - un **`.htaccess`** dans le dossier web du domaine, qui relaie le site vers la console
+     (l'ancien fichier est gardé sous `.htaccess.avant-hots`, le chemin `/.well-known/` reste
+     libre pour le renouvellement Let's Encrypt) ;
+   - dans votre **crontab** : démarrage au redémarrage du serveur, surveillance toutes les
+     5 minutes (redémarre la console si elle s'arrête), sauvegarde quotidienne (14 jours).
+4. À la fin, le **lien de création du compte administrateur** s'affiche : passez au §2.
+
+Sans questions : `bash install-mutualise.sh --domain console.mondomaine.fr --yes`
+(autres options : `--webroot DOSSIER`, `--port N`, `--no-htaccess`, `--no-cron`).
+
+**Commandes ensuite** (`~/hots-console/hots …`) : `status`, `restart`, `logs`, `setup-link`,
+`reset-password EMAIL`, `backup`, `uninstall`. **Mise à jour** : décompressez le nouveau zip et
+relancez `bash install-mutualise.sh` (base, réglages et port conservés).
+
+<details>
+<summary><strong>Pas de .htaccess possible (Nginx, panneau différent) : relais manuel</strong></summary>
+
+Lancez `bash install-mutualise.sh --no-htaccess` : le script affiche le port local de la console
+(ex. `127.0.0.1:28417`). Dans le panneau, faites relayer **tout le site** vers
+`http://127.0.0.1:28417/` : Virtualmin **Configuration Web → Chemins de proxy** (« Proxy Paths »,
+selon la version « Website Redirects » ou « Proxy website »), chemin `/`. Gardez le certificat
+Let's Encrypt actif sur le domaine.
+</details>
+
+> ⚠️ **Hébergement mutualisé et « Couper Internet »** : quand Internet est coupé sur un PC, la
+> console reste joignable grâce à une exception pour son adresse IP. Sur un mutualisé, cette
+> adresse est partagée avec les autres sites du serveur, qui restent donc joignables eux aussi.
+> Le reste du contrôle parental n'est pas concerné. Pour un établissement, préférez un petit VPS
+> avec `deploy.sh`.
+>
+> Avec des dizaines de PC, chaque PC garde une connexion ouverte en permanence vers la console :
+> sur un mutualisé, au-delà d'une cinquantaine de PC, passez plutôt à un VPS.
 
 ---
 

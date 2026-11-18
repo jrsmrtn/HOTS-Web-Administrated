@@ -22,3 +22,7 @@ ONLINE_GRACE_SECONDS = float(_env("HOTS_ONLINE_GRACE", "75"))
 
 SESSION_DAYS = int(_env("HOTS_SESSION_DAYS", "14"))
 DEFAULT_AGENT_LANG = _env("HOTS_AGENT_LANG", "fr") or "fr"
+
+# Public address of the console (https://console.example.org). Optional: by default it is learnt from
+# the superadmin's browser. Set it behind a proxy that does not forward the Host header (shared hosting).
+PUBLIC_URL = _env("HOTS_PUBLIC_URL").rstrip("/")

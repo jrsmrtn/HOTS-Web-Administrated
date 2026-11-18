@@ -2,6 +2,13 @@
 
 [← Back to README](README.md)
 
+> **Fork « HOTS Hosts — Web administré ».** For the web console (`server/`), the remote agent
+> (`hosts_editor/remote/`) and the anti-bypass protections added by this fork, report privately
+> through **Security → Report a vulnerability** on
+> [jrsmrtn/HOTS-Web-Administrated](https://github.com/jrsmrtn/HOTS-Web-Administrated/security),
+> not to the original maintainer. Issues in the original Windows application can still be
+> reported as described below.
+
 ## Overview
 
 HOTS Hosts is an open-source Windows utility for managing the system `hosts` file, parental controls, application blocking, DNS configuration, and privacy-related Windows settings.

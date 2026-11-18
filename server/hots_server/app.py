@@ -305,7 +305,10 @@ def own_device(user, device_id: str):
 
 async def bootstrap(request: Request):
     user = current_user(request, required=False)
-    if user and user["is_superadmin"]:
+    if settings.PUBLIC_URL:
+        if db.get_meta("public_url") != settings.PUBLIC_URL:
+            db.set_meta("public_url", settings.PUBLIC_URL)
+    elif user and user["is_superadmin"]:
         base = str(request.base_url).rstrip("/")
         if base.startswith("https://") and db.get_meta("public_url") != base:
             db.set_meta("public_url", base)
@@ -1255,6 +1258,7 @@ def _int_path(name: str) -> str:
 
 routes = [
     Route("/", index),
+    Route("/index.html", index),  # Apache DirectoryIndex sub-request behind a .htaccess proxy
     Route("/healthz", health),
     Route("/api/bootstrap", bootstrap),
     Route("/api/setup", setup, methods=["POST"]),

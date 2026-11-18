@@ -199,3 +199,13 @@ def test_server_and_agent_action_lists_match():
 def test_code_normalization(raw, expected):
     from hots_server.security import normalize_code
     assert normalize_code(raw) == expected
+
+
+def test_behind_htaccess_proxy(client, monkeypatch):
+    """Shared hosting: Apache asks for /index.html, and the public address comes from HOTS_PUBLIC_URL."""
+    from hots_server import db, settings
+    monkeypatch.setattr(settings, "PUBLIC_URL", "https://console.example.org")
+    r = client.get("/index.html")
+    assert r.status_code == 200 and "<html" in r.text.lower()
+    client.get("/api/bootstrap")
+    assert db.get_meta("public_url") == "https://console.example.org"
