@@ -190,8 +190,8 @@ begin
           Msg := Msg + Lines[I] + ' ';
       Log('Remote administration: enrollment failed (' + IntToStr(RC) + '): ' + Msg);
       if not WizardSilent then
-        MsgBox(Tr('Le PC n''a pas pu être relié à la console :', 'This PC could not be connected to the console:') +
-               #13#10#13#10 + Msg + #13#10#13#10 +
+        MsgBox(Tr('Le PC n''a pas pu être relié à la console :', 'This PC could not be connected to the console:') + #13#10#13#10 +
+               Msg + #13#10#13#10 +
                Tr('HOTS Hosts est bien installé. Vous pourrez réessayer depuis Options > Administration à distance.',
                   'HOTS Hosts is installed. You can try again from Options > Remote administration.'),
                mbError, MB_OK);

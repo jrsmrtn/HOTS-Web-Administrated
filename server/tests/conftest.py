@@ -1,8 +1,13 @@
+import mimetypes
 import os
 import sys
 import tempfile
 
 import pytest
+
+# Agent tests install a fake (empty) "winreg" module so the Windows code can be imported on Linux.
+# mimetypes reads the Windows registry when "winreg" is importable: load its tables first.
+mimetypes.init()
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SERVER = os.path.join(ROOT, "server")
