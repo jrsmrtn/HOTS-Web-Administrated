@@ -1265,7 +1265,17 @@ function antiPortableCard(ctx) {
   const st = ctx.device.state.applocker || { mode: 'off', exceptions: [], events: [] };
   const report = ((ctx.device.state.compliance || {}).report) || {};
   const children = (report.accounts || []).filter((a) => a.child);
+  const agentVer = (ctx.device.agent_version || '0').split('.').map((n) => parseInt(n, 10) || 0);
+  const agentTooOld = agentVer[0] < 1 || (agentVer[0] === 1 && (agentVer[1] < 2 || (agentVer[1] === 2 && (agentVer[2] || 0) < 1)));
   const setMode = async (mode) => {
+    if (mode === 'enforce' && agentTooOld) {
+      await modal({
+        title: 'Mettez d\'abord ce PC à jour', iconName: 'alert',
+        body: h('p', null, `Sur ce PC, HOTS Hosts est en version ${ctx.device.app_version || 'ancienne'} : en mode Blocage, cette version bloque aussi le menu Démarrer et les applications du Store. Installez la dernière version de HOTS Hosts sur le PC (le PC reste relié à la console), puis réessayez.`),
+        actions: [{ label: 'OK', kind: 'primary', value: true }],
+      });
+      return;
+    }
     if (mode === 'enforce' && !(await confirmDialog('Le compte enfant ne pourra plus lancer que les programmes installés et ceux que vous avez approuvés. Les comptes des parents ne sont pas concernés. Continuer ?', { ok: 'Activer le blocage' }))) return;
     await ctx.exec('applocker.set', { mode }, `Mode anti-portable : ${APPLOCKER_MODES.find((m) => m[0] === mode)[1]}`);
   };
