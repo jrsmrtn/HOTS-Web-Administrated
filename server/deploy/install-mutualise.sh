@@ -283,6 +283,11 @@ fi
 # --- 7. Web server: Apache .htaccess proxy -------------------------------------------------------------------------
 step "Publication sur https://${DOMAIN}"
 if [ "${HTACCESS}" = 1 ]; then
+  if [ -z "${WEBROOT}" ] && [ -f "${DIR}/htaccess.path" ]; then
+    # Update: same web folder as the previous installation, no question.
+    WEBROOT="$(dirname "$(head -n 1 "${DIR}/htaccess.path")")"
+    [ -d "${WEBROOT}" ] || WEBROOT=""
+  fi
   if [ -z "${WEBROOT}" ]; then
     host="${DOMAIN%%:*}"
     for d in "${HOME}/domains/${host}/public_html" "${HOME}/public_html" "${HOME}/www" "${HOME}/httpdocs"; do
