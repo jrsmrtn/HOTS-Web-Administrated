@@ -1,6 +1,6 @@
 
 #define MyAppName "HOTS Hosts"
-#define MyAppVersion "2.5.1"
+#define MyAppVersion "2.6.0"
 #define MyAppPublisher "Darsono"
 #define MyAppExeName "HOTS Hosts.exe"
 #define AgentExeName "HOTS Remote Agent.exe"

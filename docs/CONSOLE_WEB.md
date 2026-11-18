@@ -356,7 +356,7 @@ python3 server/tools/demo_agent.py --server https://votre-console --code VOTRE-C
 2. Poussez un tag correspondant :
 
 ```bash
-git tag v2.5.1 && git push origin v2.5.1
+git tag v2.6.0 && git push origin v2.6.0
 ```
 
 3. Le workflow **Build and Release** vérifie les numéros de version, construit
