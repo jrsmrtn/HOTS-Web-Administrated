@@ -23,6 +23,7 @@ RESULTS_PATH = "/api/agent/results"
 GOODBYE_PATH = "/api/agent/goodbye"
 
 POLL_TIMEOUT = 70            # server holds the request up to ~25 s
+OUTBOX_EVERY = 300  # activity journal: summaries sent every 5 minutes
 STATE_REFRESH = 15 * 60      # periodic full state upload
 PERIODIC_CHECKS = 30 * 60    # netblock exclusions, auto-repair, compliance
 FAST_CHECKS = 30             # networks: captive portals, trusted networks, new adapters
@@ -73,7 +74,8 @@ def goodbye(cfg: dict) -> None:
 
 class Agent:
     def __init__(self, cfg: dict, executor, state_builder, info_builder, periodic=None,
-                 stop_event: threading.Event = None, lang: str = "fr", periodic_fast=None, on_config=None):
+                 stop_event: threading.Event = None, lang: str = "fr", periodic_fast=None, on_config=None,
+                 outbox=None, outbox_ack=None):
         """
         executor(action, params, lang) -> (ok, result, error, mutating)
         state_builder(lang) -> dict
@@ -81,6 +83,7 @@ class Agent:
         periodic(agent) -> bool  (every PERIODIC_CHECKS s, worker thread; True = state changed)
         periodic_fast(agent) -> bool  (every FAST_CHECKS s)
         on_config(agent, response) -> None  (settings pushed by the console in each poll response)
+        outbox() -> list, outbox_ack(list)  (activity day summaries, sent every OUTBOX_EVERY s)
         """
         self.cfg = cfg
         self.executor = executor
@@ -89,6 +92,9 @@ class Agent:
         self.periodic = periodic
         self.periodic_fast = periodic_fast
         self.on_config = on_config
+        self.outbox = outbox
+        self.outbox_ack = outbox_ack
+        self._last_outbox = 0.0
         self._last_fast = 0.0
         self.stop_event = stop_event or threading.Event()
         self.lang = lang
@@ -211,6 +217,14 @@ class Agent:
             payload = {"protocol": PROTOCOL_VERSION, "info": self.info_builder(), "results": results}
             if state is not None:
                 payload["state"] = state
+            activity = []
+            if self.outbox and time.monotonic() - self._last_outbox >= OUTBOX_EVERY:
+                try:
+                    activity = self.outbox() or []
+                except Exception:
+                    log.exception("activity journal could not be read")
+                if activity:
+                    payload["activity"] = activity
             started = time.monotonic()
             try:
                 resp = self.transport.request("POST", POLL_PATH, payload, timeout=POLL_TIMEOUT)
@@ -232,6 +246,14 @@ class Agent:
                 continue
 
             backoff = 1.0
+            if activity:
+                self._last_outbox = time.monotonic()
+                try:
+                    self.outbox_ack(activity)
+                except Exception:
+                    log.exception("activity journal ack failed")
+            if resp.get("request_activity"):
+                self._last_outbox = 0.0
             if connected is not True:
                 log.info("connected to %s", self.cfg["server_url"])
                 config.write_status(connected=True, last_error="", revoked=False,

@@ -217,6 +217,8 @@ protections actives. Cliquez un PC pour l'administrer :
 | Onglet | Ce que vous pouvez faire à distance |
 |---|---|
 | **Contrôle parental** | Bloquer 15 catégories (TikTok, YouTube, réseaux sociaux, adultes, jeux, rencontres…), filtre DNS familial Cloudflare, votre propre liste de sites bloqués. |
+| **Temps d'écran** | Pour chaque compte enfant : heures autorisées et durée maximale, jour par jour (modèles « Semaine d'école », « Vacances »), **+15 min / +30 min / +1 h** pour aujourd'hui, **Bloquer maintenant** (30 min, 1 h, jusqu'à demain), temps utilisé aujourd'hui et sur 7 jours. |
+| **Activité** | Pour chaque compte enfant et chaque jour : temps d'écran par heure, **applications** utilisées et durée, **sites web** visités (temps estimé) ou **bloqués** (par quelle liste), **programmes bloqués**, titres des fenêtres (facultatif), événements (temps écoulé, session verrouillée…). |
 | **Sécurité** | **Score sur 100** et « 3 actions à faire » : compte enfant administrateur, protections annulées, navigateurs portables ou VPN trouvés dans les dossiers de l'enfant, extensions VPN, filtre DNS incomplet, UAC, Secure Boot, chiffrement… avec des boutons « Corriger ». Déclaration du ou des comptes enfants, passage en compte standard, auto-réparation. |
 | **Protections** | Verrouiller le fichier hosts, **couper Internet** (la console reste joignable pour le rétablir), bloquer les VPN, bloquer la restauration du système, bloquer le « DNS sécurisé » de chaque navigateur, **navigateurs verrouillés** et **DNS verrouillé** (voir ci-dessous). |
 | **Applications** | Bloquer n'importe quel programme, ou le choisir dans la liste des programmes installés ; suspendre / retirer un blocage. |
@@ -235,6 +237,46 @@ Bon à savoir :
   publicitaire, recherche Bing…) : ils s'affichent avec le badge « Session utilisateur » et se
   règlent dans l'application sur le PC.
 - La console s'utilise aussi sur **téléphone**, et suit le thème clair/sombre de l'appareil.
+
+### Temps d'écran et journal d'activité
+
+Indiquez d'abord le **compte Windows de l'enfant** (onglet Sécurité). Les comptes des parents ne
+sont jamais limités ni suivis.
+
+**Temps d'écran** (onglet du même nom) :
+
+- choisissez un modèle ou réglez chaque jour : une ou plusieurs **plages horaires** (ex.
+  7 h–8 h et 16 h 30–20 h 30) et une **durée maximale** (ex. 1 h 30) ;
+- le temps compte quand la session de l'enfant est ouverte et déverrouillée (pas après
+  30 minutes sans clavier ni souris) ;
+- l'enfant est prévenu **10, 5 puis 1 minute** avant la fin. À la fin, un message s'affiche et la
+  session est **verrouillée une minute plus tard** (programmes conservés), ou fermée si vous le
+  choisissez ;
+- **+15 min / +30 min / +1 h** : du temps en plus pour aujourd'hui (en dehors des heures
+  autorisées, cela ouvre une fenêtre de cette durée). **Bloquer maintenant** : 30 min, 1 h ou
+  jusqu'à demain ;
+- les règles sont gardées sur le PC et s'appliquent **même sans Internet**.
+
+**Activité** (onglet du même nom) : activez « Enregistrer l'activité des enfants ». Ensuite, jour
+par jour :
+
+- **applications** au premier plan et durée d'utilisation ;
+- **sites web** : visités (avec un **temps estimé** : minutes pendant lesquelles le site a servi,
+  navigateur au premier plan) ou **bloqués**, avec la liste responsable (ex. « TikTok », « Filtre
+  familial (DNS) ») et le nombre de tentatives ;
+- **programmes bloqués** par le mode anti-portable ;
+- titres des fenêtres et des pages (facultatif, ex. « Fortnite - YouTube ») et **événements**
+  (temps écoulé, session verrouillée, suivi fermé par l'enfant).
+
+Les données arrivent toutes les 5 minutes (bouton **Actualiser** pour les avoir tout de suite) et
+sont gardées 90 jours sur la console, 31 jours sur le PC.
+
+> Comment c'est mesuré : l'agent lance, dans la session de l'enfant et avec ses droits, un petit
+> programme (« HOTS Remote Agent.exe ») qui note toutes les 5 secondes l'application au premier
+> plan. S'il est fermé, l'agent le relance et le note dans les événements. Les sites viennent du
+> journal « DNS Client » de Windows, que l'agent active ; Chrome, Edge et Brave sont réglés pour
+> passer par le résolveur de Windows. **Établissements : informez les élèves et leurs familles de
+> ce suivi (RGPD).**
 
 ### Renforcer la protection contre les contournements
 
@@ -358,7 +400,7 @@ sudo /opt/hots-console/deploy.sh
 
 **Sur le PC**
 
-- L'agent n'exécute qu'une **liste fermée de 42 actions** (activer une catégorie, bloquer une
+- L'agent n'exécute qu'une **liste fermée de 47 actions** (activer une catégorie, bloquer une
   application, modifier une entrée hosts…). Il n'existe **aucune** commande « exécuter un
   programme » ou « écrire un fichier quelconque » : même un serveur compromis ne peut pas s'en
   servir pour prendre la main sur les PC.
@@ -420,11 +462,11 @@ python3 server/tools/demo_agent.py --server https://votre-console --code VOTRE-C
 2. Poussez un tag correspondant :
 
 ```bash
-git tag v2.6.0 && git push origin v2.6.0
+git tag v2.7.0 && git push origin v2.7.0
 ```
 
    Ou, sans tag, depuis GitHub : **Actions → Build and Release → Run workflow**, choisissez la
-   branche et saisissez la version (`2.6.0`). Le workflow crée lui-même le tag `v2.6.0`.
+   branche et saisissez la version (`2.7.0`). Le workflow crée lui-même le tag `v2.7.0`.
 
 3. Le workflow **Build and Release** vérifie les numéros de version, construit
    `HOTS_Hosts_setup.exe` (Windows, Nuitka + Inno Setup, avec l'agent), teste et empaquette

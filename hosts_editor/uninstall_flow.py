@@ -221,6 +221,13 @@ def apply_uninstall_choices(choices: dict) -> dict:
     except Exception as e:
         report["errors"].append(f"network_hardening: {e}")
     try:
+        # Activity journal: DNS Client log and Chromium "use the Windows resolver" policy restored.
+        from .core_activity import disable as _activity_off, load_settings as _activity_settings
+        if (_activity_settings()["enabled"] or _activity_settings()["originals"]) and not _activity_off():
+            report["errors"].append("activity: journal settings not fully restored")
+    except Exception as e:
+        report["errors"].append(f"activity: {e}")
+    try:
         # SafeSearch points domains to fixed IPs: never leave it behind (it would go stale).
         from .core import toggle_parental_control
         from .core_safesearch import TAG as _SAFESEARCH_TAG

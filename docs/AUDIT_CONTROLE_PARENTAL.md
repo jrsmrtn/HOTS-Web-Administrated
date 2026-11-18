@@ -10,7 +10,7 @@
 > | P1.4 Mot de passe (ACL du registre, 8 car., migration de l'ancien hash), mutex de l'agent, verrou d'écriture inter-processus + rechargement GUI, auto-réparation, NAT64, applis par profil, refus de `http://` | ✅ | `secure_storage.py`, `core.py`, `app.py`, `remote/service.py`… |
 > | P1.5 Alertes (hors ligne, ré-enrôlement, Windows réinstallé, désinstallation, redémarrages, non-conformité), mode absence, e-mail SMTP | ✅ | `server/hots_server/alerts.py` |
 >
-> Testé sous Linux : 70 tests automatiques (phases 1 et 2), plus un parcours navigateur complet avec un PC simulé.
+> Testé sous Linux : 80 tests automatiques (phases 1 à 3), plus un parcours navigateur complet avec un PC simulé.
 > Les points ci-dessous **restent à vérifier sur un vrai Windows** (protocoles §3.6) :
 >
 > - **T2** : prise en compte de la stratégie `NameServer` sur Windows **Famille** (couche de défense supplémentaire, sans effet si elle est ignorée) ;
@@ -31,7 +31,7 @@
 > | P2.4 Navigation privée désactivée par enfant (HKU) | ✅ (stratégies « privées » uniquement : les stratégies machine priment pour le reste) | `core_browser_policy.py` |
 > | P2.5 SafeSearch / YouTube / Bing par le fichier hosts | ✅ | `hosts_editor/core_safesearch.py` |
 > | P2.6 Détection d'altérations | ✅ | `hosts_editor/compliance.py` |
-> | P2.7 Plages horaires | ⏸ non fait (fonction absente de l'agent) | — |
+> | P2.7 Plages horaires et durées quotidiennes (+ journal d'activité, phase 3) | ✅ | `hosts_editor/core_screentime.py`, `core_activity.py`, `core_sessions.py`, `remote/monitor.py` |
 >
 > À vérifier sur Windows en plus de la phase 1 :
 >
@@ -40,6 +40,14 @@
 > - `SettingsPageVisibility` et `ProxySettingsPerUser` sur Famille ;
 > - détection du SSID et de la MAC de passerelle (`netsh wlan`, `arp`) avec Windows en français ;
 > - SafeSearch : adresses de `forcesafesearch.google.com`, `restrict(moderate).youtube.com` et `strict.bing.com` résolues par le DNS familial.
+>
+> **Phase 3 (temps d'écran, journal d'activité)** — à vérifier sur Windows :
+>
+> - sessions vues par l'agent (WTSEnumerateSessions, état verrouillé via `WTSSessionInfoEx`) sur Windows 10 et 11 ;
+> - messages `WTSSendMessage` et verrouillage par `WTSDisconnectSession` de la session console (retour à l'écran de verrouillage) ;
+> - lancement de l'assistant dans la session de l'enfant (`WTSQueryUserToken` + `CreateProcessAsUser`, sans fenêtre) et lecture de sa sortie ;
+> - journal `Microsoft-Windows-DNS-Client/Operational` : événements 3008 avec le **PID du navigateur** (Chrome/Edge avec `BuiltInDnsClientEnabled=0`, Firefox) ;
+> - applications du Store (titre de fenêtre via `ApplicationFrameHost.exe`).
 
 
 *Date : 18/11/2026. Base : commit `467161a` (v2.5) + copie de travail en cours (agent `hosts_editor/remote/`). Les numéros de ligne renvoient à l'état du dépôt à cette date et peuvent bouger avec le développement en parallèle ; les noms de fonctions servent de repère stable.*

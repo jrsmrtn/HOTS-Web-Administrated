@@ -51,11 +51,24 @@ Toutes les versions : [page Releases](https://github.com/jrsmrtn/HOTS-Web-Admini
   - **SafeSearch** Google et Bing et mode restreint YouTube partout ;
   - **alertes** (PC hors ligne, Windows réinstallé, protection retirée, nouveau compte
     administrateur…), aussi par e-mail.
+- ⏱️ **Temps d'écran** pour chaque enfant : heures autorisées et durée maximale jour par jour,
+  avertissements 10, 5 et 1 minute avant la fin puis verrouillage de la session, « +30 min » ou
+  « Bloquer maintenant » à distance. Les règles s'appliquent même sans Internet.
+- 📊 **Journal d'activité** : applications utilisées et durée, sites visités (temps estimé) ou
+  bloqués (par quelle liste), programmes bloqués, utilisation heure par heure. Jamais pour les
+  comptes des parents.
 - 🏫 **Pensé pour l'école** : sur les **réseaux de confiance** (Wi-Fi de l'établissement), le PC
   utilise le DNS et le proxy de l'établissement. Sur un **Wi-Fi public** (gare, hôtel), une fenêtre
   de 10 minutes permet de passer la page de connexion. Un élève reste donc connecté partout.
 - 🕵️ **Confidentialité Windows** et **éditeur du fichier hosts** : toutes les fonctions de
   l'application d'origine restent disponibles sur le PC.
+
+<table>
+<tr>
+<td width="50%" valign="top"><img src="docs/images/console-activite.png" alt="Onglet Activité : temps d'écran, applications, sites visités ou bloqués"/><br/><sub>Activité d'un enfant : applications, sites visités ou bloqués, temps passé</sub></td>
+<td width="50%" valign="top"><img src="docs/images/console-temps-ecran.png" alt="Onglet Temps d'écran : plages horaires et durées par jour"/><br/><sub>Temps d'écran : plages horaires, durée par jour, temps en plus ou blocage à distance</sub></td>
+</tr>
+</table>
 
 Le PC n'ouvre **aucun port** : c'est lui qui contacte la console en HTTPS, ce qui fonctionne
 derrière n'importe quelle box ou réseau d'établissement. Il n'exécute qu'une **liste fermée

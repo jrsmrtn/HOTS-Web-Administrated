@@ -80,6 +80,9 @@ const ICONS = {
   calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
   wifi: '<path d="M5 12.55a11 11 0 0 1 14.08 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/>',
   usb: '<path d="M10 7V3h4v4M8 7h8v6a4 4 0 0 1-8 0V7zM12 17v4"/>',
+  hourglass: '<path d="M6 2h12M6 22h12M7 2v4a5 5 0 0 0 10 0V2M7 22v-4a5 5 0 0 1 10 0v4"/>',
+  activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  next: '<path d="M5 12h14M13 6l6 6-6 6"/>',
 };
 
 function icon(name) {
@@ -715,6 +718,8 @@ async function addDeviceDialog(knownCount) {
 
 const TABS = [
   ['parental', 'smile', 'Contrôle parental'],
+  ['screentime', 'hourglass', 'Temps d\'écran'],
+  ['activity', 'activity', 'Activité'],
   ['security', 'shieldcheck', 'Sécurité'],
   ['protections', 'shield', 'Protections'],
   ['apps', 'apps', 'Applications'],
@@ -837,12 +842,12 @@ async function viewDevice([id, tab], token) {
       if (fresh.open_alerts !== ctx.device.open_alerts) await ctx.loadAlerts();
       ctx.device = fresh;
       if (statusChanged || stateChanged) paintHead();
-      if (stateChanged && !ctx.dirty && !['hosts', 'journal'].includes(tab)) await paintTab();
+      if (stateChanged && !ctx.dirty && !['hosts', 'journal', 'activity'].includes(tab)) await paintTab();
     } catch (e) { /* ignoré : nouvel essai au prochain tour */ }
   });
 }
 
-const READ_ONLY = new Set(['agent.ping', 'get_state', 'hosts.read', 'hosts.backups', 'apps.list_installed', 'privacy.check_drift', 'compliance.check']);
+const READ_ONLY = new Set(['agent.ping', 'get_state', 'hosts.read', 'hosts.backups', 'apps.list_installed', 'privacy.check_drift', 'compliance.check', 'activity.sync']);
 
 /* ---------- Onglet : contrôle parental ---------- */
 
@@ -1558,6 +1563,274 @@ function absenceCard(ctx) {
         })));
 }
 
+/* ---------- Onglet : temps d'écran ---------- */
+
+const DAY_LABELS = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'];
+const ST_REASONS = {
+  paused: 'Bloqué depuis la console', outside: 'En dehors des heures autorisées',
+  no_time_today: 'Pas d\'ordinateur aujourd\'hui', quota: 'Temps du jour épuisé',
+};
+const QUOTA_CHOICES = [null, 30, 45, 60, 90, 120, 150, 180, 240, 300, 360, 480];
+const ST_PRESETS = {
+  school: ['Semaine d\'école', () => [0, 1, 2, 3, 4, 5, 6].map((i) => (
+    i === 2 ? { ranges: [['08:00', '20:30']], quota: 180 }
+      : i >= 5 ? { ranges: [['09:00', '21:00']], quota: 180 }
+        : { ranges: [['07:00', '08:00'], ['16:30', '20:30']], quota: 90 }))],
+  holidays: ['Vacances', () => Array.from({ length: 7 }, () => ({ ranges: [['09:00', '21:30']], quota: 240 }))],
+  free: ['Sans limite', () => Array.from({ length: 7 }, () => ({ ranges: [['00:00', '24:00']], quota: null }))],
+};
+
+function fmtMin(m) {
+  if (m == null) return '—';
+  m = Math.max(0, Math.round(m));
+  const hh = Math.floor(m / 60);
+  const mm = m % 60;
+  return hh ? `${hh} h${mm ? ` ${String(mm).padStart(2, '0')}` : ''}` : `${mm} min`;
+}
+function fmtDur(s) { return s < 60 ? (s > 0 ? '< 1 min' : '—') : fmtMin(s / 60); }
+function quotaLabel(q) { return q == null ? 'Sans limite' : q === 0 ? 'Aucun' : fmtMin(q); }
+
+function meter(value, max, kind = '') {
+  const pct = max > 0 ? Math.min(100, Math.round((value / max) * 100)) : 0;
+  return h('div', { class: `meter ${kind}`, role: 'progressbar', 'aria-valuenow': String(pct), 'aria-valuemin': '0', 'aria-valuemax': '100' },
+    h('span', { style: { width: `${pct}%` } }));
+}
+
+function noChildBanner(ctx) {
+  return banner('warn', 'users', h('p', null, 'Indiquez d\'abord le compte Windows de l\'enfant dans l\'onglet ',
+    h('a', { href: `#/pc/${ctx.id}/security` }, 'Sécurité'), ' (« Compte enfant »). Les comptes des parents ne sont jamais limités ni suivis.'));
+}
+
+function tabScreentime(ctx, box) {
+  const items = ctx.device.state.screentime || [];
+  if (!items.length) { put(box, noChildBanner(ctx)); return; }
+  items.forEach((item) => put(box, screentimeCard(ctx, item)));
+  put(box, card('Comment ça marche', 'info', null,
+    h('ul', { class: 'small', style: { margin: 0, 'padding-left': '18px' } },
+      h('li', null, 'Le temps compte quand la session de l\'enfant est ouverte et déverrouillée (pas quand l\'écran est verrouillé, ni après 30 minutes sans toucher au clavier ou à la souris).'),
+      h('li', null, 'L\'enfant est prévenu 10, 5 puis 1 minute avant la fin. À la fin, un message s\'affiche et la session est verrouillée une minute plus tard (ses programmes restent ouverts).'),
+      h('li', null, 'Les règles sont gardées sur le PC : elles s\'appliquent même sans Internet.'),
+      h('li', null, 'Le temps supplémentaire ne vaut que pour aujourd\'hui. En dehors des heures autorisées, il ouvre une fenêtre de cette durée.'))));
+}
+
+function screentimeCard(ctx, item) {
+  const pol = item.policy;
+  const now = item.now || {};
+  const sid = item.sid;
+  const status = !pol.enabled ? badge('Pas de limite', '', 'clock')
+    : now.allowed ? badge(now.remaining_min == null ? 'Autorisé, sans limite aujourd\'hui' : `Reste ${fmtMin(now.remaining_min)}${now.until ? ` (jusqu'à ${now.until})` : ''}`, now.remaining_min != null && now.remaining_min <= 10 ? 'warn' : 'ok', 'check')
+      : badge(ST_REASONS[now.reason] || 'Bloqué', 'danger', 'lock');
+  const bonus = (m) => ctx.exec('screentime.bonus', { sid, minutes: m }, `${item.name} : +${fmtMin(m)} aujourd'hui`);
+  const pause = async () => {
+    const choice = await modal({
+      title: `Bloquer le PC pour ${item.name}`, iconName: 'lock',
+      body: h('p', null, 'La session de l\'enfant est verrouillée une minute après un message d\'avertissement.'),
+      actions: [{ label: 'Annuler', value: null }, { label: '30 minutes', value: 30 }, { label: '1 heure', value: 60 },
+        { label: 'Jusqu\'à demain', value: -1, kind: 'danger' }],
+    });
+    if (choice) await ctx.exec('screentime.pause', { sid, minutes: choice }, `${item.name} : PC bloqué`);
+  };
+  const hist = item.history || [];
+  const maxHist = Math.max(60, ...hist.map((d) => d.minutes));
+  const quotaToday = now.quota_min;
+  return card(`Temps d'écran — ${item.name}`, 'hourglass', null,
+    h('div', { class: 'st-status' },
+      h('div', { class: 'st-now' },
+        status,
+        pol.enabled && now.next_allowed && !now.allowed ? h('div', { class: 'small muted' }, `Prochaine utilisation possible ${now.next_allowed}`) : null,
+        h('div', { class: 'st-used' }, h('strong', null, fmtMin(now.used_min || 0)), h('span', { class: 'muted' },
+          quotaToday != null ? ` utilisées sur ${fmtMin(quotaToday)} aujourd'hui` : ' utilisées aujourd\'hui',
+          now.bonus_min ? ` (dont +${fmtMin(now.bonus_min)} accordées)` : '')),
+        quotaToday != null ? meter(now.used_min || 0, quotaToday, (now.used_min || 0) >= quotaToday ? 'danger' : '') : null),
+      h('div', { class: 'week-bars', 'aria-label': 'Temps d\'écran des 7 derniers jours' }, hist.map((d) => h('div', { class: 'wb', title: `${d.day} : ${fmtMin(d.minutes)}` },
+        h('div', { class: 'wb-track' }, h('span', { style: { height: `${Math.round((d.minutes / maxHist) * 100)}%` } })),
+        h('small', null, DAY_LABELS[(new Date(`${d.day}T12:00:00`).getDay() + 6) % 7].slice(0, 2)))))),
+    pol.enabled ? h('div', { class: 'row wrap st-actions' },
+      btn('+15 min', { small: true, icon: 'plus', onclick: () => bonus(15) }),
+      btn('+30 min', { small: true, icon: 'plus', onclick: () => bonus(30) }),
+      btn('+1 h', { small: true, icon: 'plus', onclick: () => bonus(60) }),
+      now.reason === 'paused' ? btn('Débloquer', { small: true, kind: 'primary', icon: 'check', onclick: () => ctx.exec('screentime.pause', { sid, minutes: 0 }, `${item.name} : PC débloqué`) })
+        : btn('Bloquer maintenant', { small: true, kind: 'danger', icon: 'lock', onclick: pause })) : null,
+    scheduleEditor(ctx, item));
+}
+
+function scheduleEditor(ctx, item) {
+  const draft = JSON.parse(JSON.stringify({ enabled: item.policy.enabled, days: item.policy.days, action: item.policy.action || 'lock' }));
+  const rows = h('div', { class: 'st-days' });
+  const saveBtn = btn('Enregistrer les horaires', {
+    kind: 'primary', icon: 'check',
+    onclick: async () => {
+      const days = draft.days.map((d) => ({ ranges: d.ranges.map(([a, b]) => [a, b === '23:59' ? '24:00' : b]), quota: d.quota }));
+      for (const [i, d] of days.entries()) {
+        for (const [a, b] of d.ranges) {
+          if (!a || !b || a >= b) return toast(`${DAY_LABELS[i]} : plage horaire incomplète ou inversée (${a || '?'} – ${b || '?'}).`, 'error');
+        }
+      }
+      ctx.dirty = false;
+      await ctx.exec('screentime.set', { sid: item.sid, policy: { enabled: draft.enabled, days, action: draft.action } },
+        `${item.name} : temps d'écran ${draft.enabled ? 'enregistré' : 'désactivé'}`);
+    },
+  });
+  const touched = () => { ctx.dirty = true; saveBtn.classList.add('pulse'); };
+  const timeInput = (value, onchange) => {
+    const inp = h('input', { type: 'time', value: value === '24:00' ? '23:59' : value, step: 300, 'aria-label': 'Heure' });
+    inp.addEventListener('change', () => { onchange(inp.value); touched(); });
+    return inp;
+  };
+  const quotaSelect = (day) => {
+    const values = QUOTA_CHOICES.includes(day.quota) ? QUOTA_CHOICES : [...QUOTA_CHOICES, day.quota].sort((a, b) => (a ?? 1e9) - (b ?? 1e9));
+    const sel = h('select', { 'aria-label': 'Durée par jour' }, values.map((q) => h('option', { value: q == null ? '' : String(q), selected: q === day.quota }, quotaLabel(q))));
+    sel.addEventListener('change', () => { day.quota = sel.value === '' ? null : Number(sel.value); touched(); });
+    return sel;
+  };
+  const paint = () => {
+    put(clear(rows), draft.days.map((day, i) => h('div', { class: 'st-day' },
+      h('div', { class: 'st-dayname' }, DAY_LABELS[i]),
+      h('div', { class: 'st-ranges' },
+        day.ranges.length ? day.ranges.map((r, ri) => h('span', { class: 'st-range' },
+          timeInput(r[0], (v) => { r[0] = v; }), h('span', { class: 'muted' }, '→'), timeInput(r[1], (v) => { r[1] = v; }),
+          btn('', { small: true, icon: 'x', label: 'Retirer cette plage', onclick: () => { day.ranges.splice(ri, 1); touched(); paint(); } })))
+          : h('span', { class: 'small muted' }, 'Pas d\'ordinateur ce jour-là'),
+        day.ranges.length < 6 ? btn('Plage', { small: true, icon: 'plus', onclick: () => { day.ranges.push(day.ranges.length ? ['17:00', '19:00'] : ['09:00', '21:00']); touched(); paint(); } }) : null),
+      h('div', { class: 'st-quota' }, h('span', { class: 'small muted' }, 'Durée'), quotaSelect(day)))));
+  };
+  paint();
+  const actionSel = h('select', { 'aria-label': 'Quand le temps est écoulé' },
+    h('option', { value: 'lock', selected: draft.action === 'lock' }, 'verrouiller la session (programmes conservés)'),
+    h('option', { value: 'logoff', selected: draft.action === 'logoff' }, 'fermer la session (travail non enregistré perdu)'));
+  actionSel.addEventListener('change', () => { draft.action = actionSel.value; touched(); });
+  const editor = h('div', { class: 'st-editor', hidden: !draft.enabled },
+    h('div', { class: 'row wrap', style: { gap: '8px', 'margin-bottom': '10px' } }, h('span', { class: 'small muted' }, 'Modèles :'),
+      Object.values(ST_PRESETS).map(([label, make]) => btn(label, { small: true, onclick: () => { draft.days = make(); touched(); paint(); } })),
+      btn('Copier lundi sur mardi → vendredi', { small: true, icon: 'copy', onclick: () => { for (let i = 1; i < 5; i++) draft.days[i] = JSON.parse(JSON.stringify(draft.days[0])); touched(); paint(); } })),
+    rows,
+    h('div', { class: 'row wrap', style: { 'margin-top': '10px', gap: '8px' } }, h('span', { class: 'small' }, 'Quand le temps est écoulé :'), actionSel));
+  const toggle = h('input', { type: 'checkbox', role: 'switch', checked: draft.enabled, 'aria-label': 'Limiter le temps d\'écran' });
+  toggle.addEventListener('change', () => { draft.enabled = toggle.checked; editor.hidden = !draft.enabled; touched(); });
+  return h('div', { class: 'st-schedule' },
+    settingRow('Limiter le temps d\'écran', 'Heures autorisées et durée maximale, jour par jour.',
+      h('label', { class: 'switch' }, toggle, h('span', { class: 'slider' }))),
+    editor,
+    h('div', { class: 'row', style: { 'justify-content': 'flex-end', 'margin-top': '12px' } }, saveBtn));
+}
+
+/* ---------- Onglet : activité ---------- */
+
+function siteStatus(s) {
+  if (s.blocked && !s.n) return badge(`Bloqué${s.by ? ` · ${s.by}` : ''}`, 'danger', 'shieldcheck');
+  if (s.blocked) return badge(`Visité, ${s.blocked} accès bloqué(s)${s.by ? ` · ${s.by}` : ''}`, 'warn');
+  return badge('Autorisé', 'ok');
+}
+
+function hoursChart(hours) {
+  const max = Math.max(900, ...hours);
+  return h('div', { class: 'hours-chart', 'aria-label': 'Utilisation par heure' }, hours.map((s, i) => h('div', { class: 'hc', title: `${i} h : ${fmtDur(s)}` },
+    h('div', { class: 'hc-track' }, h('span', { style: { height: `${Math.round((s / max) * 100)}%` } })),
+    h('small', null, i % 3 === 0 ? `${i}h` : ''))));
+}
+
+function timeOfDay(ts) { return ts ? new Date(ts * 1000).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : ''; }
+
+async function tabActivity(ctx, box) {
+  const st = ctx.device.state || {};
+  const conf = st.activity || { enabled: false, titles: true, children: [] };
+  const children = conf.children || [];
+  const dayParam = ctx.activityDay || '';
+  const data = await api('GET', `/api/devices/${ctx.id}/activity${dayParam ? `?day=${dayParam}` : ''}`);
+  ctx.activityDay = data.day;
+  put(box, card('Journal d\'activité', 'activity', 'Applications utilisées, sites visités ou bloqués et temps passé, pour les comptes enfants seulement.',
+    !children.length ? noChildBanner(ctx) : null,
+    settingRow('Enregistrer l\'activité des enfants', 'Programmes au premier plan, sites web (et tentatives bloquées), programmes bloqués. Envoyé à la console toutes les 5 minutes.',
+      switchEl(conf.enabled, async (v) => !!(await ctx.exec('activity.set', { enabled: v }, v ? 'Journal d\'activité activé' : 'Journal d\'activité désactivé')), { disabled: !children.length, label: 'Journal d\'activité' })),
+    settingRow('Titres des fenêtres et des pages', 'Ex. « Fortnite - YouTube ». Plus précis, mais plus intrusif.',
+      switchEl(conf.titles, async (v) => !!(await ctx.exec('activity.set', { enabled: conf.enabled, titles: v }, v ? 'Titres enregistrés' : 'Titres non enregistrés')), { disabled: !conf.enabled, label: 'Titres' })),
+    h('p', { class: 'small muted' }, 'Établissement scolaire : informez les élèves et leurs familles de ce suivi (RGPD). Les données sont gardées 90 jours sur la console, 31 jours sur le PC.')));
+
+  const days = data.days.length ? data.days : [data.day];
+  const idx = days.indexOf(data.day);
+  const daySel = h('select', { 'aria-label': 'Jour' }, days.map((d) => h('option', { value: d, selected: d === data.day },
+    new Date(`${d}T12:00:00`).toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' }))));
+  const reopen = async (d) => { ctx.activityDay = d; clear(box); await tabActivity(ctx, box); };
+  daySel.addEventListener('change', () => reopen(daySel.value).catch(showError));
+  put(box, h('div', { class: 'row wrap day-nav' },
+    btn('', { icon: 'back', label: 'Jour précédent', disabled: idx < 0 || idx >= days.length - 1, onclick: () => reopen(days[idx + 1]) }),
+    daySel,
+    btn('', { icon: 'next', label: 'Jour suivant', disabled: idx <= 0, onclick: () => reopen(days[idx - 1]) }),
+    h('div', { class: 'spacer' }),
+    btn('Actualiser', {
+      icon: 'refresh', small: true, disabled: !ctx.device.online || !conf.enabled, title: 'Demander au PC les dernières données',
+      onclick: async () => { await ctx.exec('activity.sync', {}, 'Lecture de l\'activité', { quiet: true, reload: false }); await reopen(ctx.activityDay); },
+    })));
+
+  if (!data.users.length) {
+    put(box, h('p', { class: 'muted' }, conf.enabled ? 'Pas encore d\'activité enregistrée pour ce jour. Les données arrivent toutes les 5 minutes quand l\'enfant utilise le PC.'
+      : 'Activez le journal pour voir ici l\'activité des comptes enfants.'));
+    return;
+  }
+  for (const u of data.users) {
+    const allowed = u.sites.filter((s) => s.n > 0);
+    const blockedSites = u.sites.filter((s) => s.blocked > 0);
+    const attempts = blockedSites.reduce((n, s) => n + s.blocked, 0) + u.blocked_apps.reduce((n, b) => n + b.n, 0);
+    const maxApp = Math.max(1, ...u.apps.map((a) => a.s));
+    let filter = 'all';
+    const siteRows = h('tbody');
+    const paintSites = () => put(clear(siteRows), u.sites
+      .filter((s) => filter === 'all' || (filter === 'blocked' ? s.blocked > 0 : s.n > 0)).slice(0, 80)
+      .map((s) => h('tr', null,
+        h('td', null, h('strong', null, s.site)),
+        h('td', null, siteStatus(s)),
+        h('td', { class: 'nowrap' }, s.s ? `≈ ${fmtDur(s.s)}` : h('span', { class: 'muted' }, '—')),
+        h('td', { class: 'small muted nowrap' }, s.n ? `${s.n} requête(s)` : `${s.blocked} tentative(s)`, h('br'), timeOfDay(s.last)))));
+    paintSites();
+    const seg = h('div', { class: 'segmented', role: 'group', 'aria-label': 'Filtrer les sites' }, [['all', 'Tous'], ['allowed', 'Visités'], ['blocked', 'Bloqués']].map(([k, label]) => {
+      const b = h('button', { type: 'button', class: k === filter ? 'active' : null }, label);
+      b.addEventListener('click', () => { filter = k; seg.querySelectorAll('button').forEach((x) => x.classList.toggle('active', x === b)); paintSites(); });
+      return b;
+    }));
+    const helperGone = u.helper && u.helper.restarts;
+    put(box, h('section', { class: 'card' },
+      h('div', { class: 'card-head' }, h('div', { class: 'icon-badge' }, icon('user')),
+        h('div', { class: 'spacer' }, h('h3', null, u.user || 'Compte enfant'), h('div', { class: 'muted small' }, `Mis à jour ${fmtAgo(u.updated_at)}`))),
+      h('div', { class: 'tiles' },
+        h('div', { class: 'tile' }, h('small', null, 'Temps d\'écran'), h('strong', null, fmtDur(u.screen_s || u.active_s))),
+        h('div', { class: 'tile' }, h('small', null, 'Applications'), h('strong', null, String(u.apps.length))),
+        h('div', { class: 'tile' }, h('small', null, 'Sites visités'), h('strong', null, String(allowed.length))),
+        h('div', { class: `tile ${attempts ? 'danger' : ''}` }, h('small', null, 'Tentatives bloquées'), h('strong', null, String(attempts)))),
+      helperGone ? banner('warn', 'alert', h('p', null, `Le suivi a été fermé ${u.helper.restarts} fois sur la session de l'enfant (il redémarre tout seul). Si cela se répète, parlez-en avec lui.`)) : null,
+      h('h4', null, 'Utilisation par heure'), hoursChart(u.hours),
+      h('h4', null, 'Applications'),
+      u.apps.length ? h('div', { class: 'table-wrap' }, h('table', null, h('tbody', null, u.apps.slice(0, 40).map((a) => h('tr', null,
+        h('td', null, h('strong', null, a.name), a.browser ? h('span', { class: 'small muted' }, ' · navigateur') : null,
+          h('div', { class: 'small muted mono' }, a.exe)),
+        h('td', { class: 'app-bar' }, meter(a.s, maxApp)),
+        h('td', { class: 'nowrap' }, fmtDur(a.s)),
+        h('td', { class: 'small muted nowrap' }, `${timeOfDay(a.first)} → ${timeOfDay(a.last)}`)))))) : h('p', { class: 'small muted' }, 'Aucune application enregistrée.'),
+      h('div', { class: 'row wrap', style: { 'align-items': 'center', gap: '10px', margin: '18px 0 8px' } }, h('h4', { style: { margin: 0 } }, 'Sites web'), h('div', { class: 'spacer' }), seg),
+      u.sites.length ? h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, h('th', null, 'Site'), h('th', null, 'Résultat'), h('th', null, 'Temps estimé'), h('th', null, 'Dernier accès'))),
+        siteRows)) : h('p', { class: 'small muted' }, 'Aucun site enregistré.'),
+      h('p', { class: 'small muted' }, 'Temps estimé : minutes pendant lesquelles le site a été utilisé, navigateur au premier plan.'),
+      u.blocked_apps.length ? h('div', null, h('h4', null, 'Programmes bloqués'), h('ul', { class: 'items' }, u.blocked_apps.map((b) => h('li', null,
+        h('span', null, h('strong', null, b.name), h('span', { class: 'small muted' }, ` · ${b.by} · ${b.n} fois, dernière à ${timeOfDay(b.last)}`),
+          h('div', { class: 'small muted mono' }, b.path)))))) : null,
+      u.titles.length ? h('details', null, h('summary', null, `Fenêtres et pages les plus vues (${u.titles.length})`),
+        h('ul', { class: 'items' }, u.titles.slice(0, 50).map((x) => h('li', null, h('span', null, x.title, h('span', { class: 'small muted' }, ` · ${x.app}`)), h('span', { class: 'nowrap small' }, fmtDur(x.s)))))) : null,
+      u.events.length ? h('details', null, h('summary', null, `Événements (${u.events.length})`),
+        h('ul', { class: 'items' }, u.events.slice().reverse().map((e) => h('li', null, h('span', null, e.text), h('span', { class: 'small muted nowrap' }, timeOfDay(e.t)))))) : null));
+  }
+  const week = data.week || [];
+  if (week.length > 1) {
+    const byUser = {};
+    week.forEach((w) => { (byUser[w.user_name || w.sid] = byUser[w.user_name || w.sid] || []).push(w); });
+    put(box, card('Temps d\'écran par jour', 'calendar', null, Object.entries(byUser).map(([name, rows]) => {
+      const max = Math.max(3600, ...rows.map((r) => r.screen_s));
+      return h('div', null, h('h4', null, name), h('div', { class: 'week-bars wide' }, rows.slice(0, 14).reverse().map((r) => h('div', { class: 'wb', title: `${r.day} : ${fmtDur(r.screen_s)}` },
+        h('div', { class: 'wb-track' }, h('span', { style: { height: `${Math.round((r.screen_s / max) * 100)}%` } })),
+        h('small', null, new Date(`${r.day}T12:00:00`).toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric' }))))));
+    })));
+  }
+}
+
 /* ---------- Onglet : journal ---------- */
 
 async function tabJournal(ctx, box) {
@@ -1579,7 +1852,7 @@ async function tabJournal(ctx, box) {
 }
 
 const TAB_RENDERERS = {
-  parental: tabParental, security: tabSecurity, protections: tabProtections, apps: tabApps, privacy: tabPrivacy,
+  parental: tabParental, screentime: tabScreentime, activity: tabActivity, security: tabSecurity, protections: tabProtections, apps: tabApps, privacy: tabPrivacy,
   hosts: tabHosts, tools: tabTools, journal: tabJournal,
 };
 

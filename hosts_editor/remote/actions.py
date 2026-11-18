@@ -470,6 +470,81 @@ def refresh_safesearch() -> bool:
         return bool(_wrap_hosts_errors(SafeSearchManager.refresh))
 
 
+# --- screen time and activity journal (children's accounts) -------------------------------------------
+
+def _child_sid(p: dict) -> str:
+    from ..compliance import child_sids
+    sid = _sid(p)
+    if sid not in child_sids():
+        raise ActionError("Ce compte n'est pas marqué comme compte enfant (onglet Sécurité).")
+    return sid
+
+
+def _screentime_of(sid: str) -> dict:
+    from . import monitor
+    for item in monitor.get().screentime_status():
+        if item["sid"] == sid:
+            return item
+    return {}
+
+
+@action("screentime.set")
+def _screentime_set(p):
+    from ..core_screentime import set_policy
+    sid = _child_sid(p)
+    try:
+        set_policy(sid, p.get("policy"))
+    except ValueError as e:
+        raise ActionError(f"Réglage refusé : {e}") from None
+    return _screentime_of(sid)
+
+
+@action("screentime.bonus")
+def _screentime_bonus(p):
+    from ..core_screentime import add_bonus
+    sid = _child_sid(p)
+    minutes = _int(p, "minutes", -240, 480)
+    if minutes == 0:
+        raise ActionError("Durée nulle.")
+    add_bonus(sid, minutes)
+    return _screentime_of(sid)
+
+
+@action("screentime.pause")
+def _screentime_pause(p):
+    from ..core_screentime import set_pause
+    sid = _child_sid(p)
+    set_pause(sid, _int(p, "minutes", -1, 1440))
+    return _screentime_of(sid)
+
+
+@action("activity.set")
+def _activity_set(p):
+    from .. import core_activity
+    enabled = _bool(p, "enabled")
+    titles = p.get("titles")
+    if titles is not None and not isinstance(titles, bool):
+        raise ActionError("Paramètre « titles » invalide.")
+    current = core_activity.load_settings()
+    titles = current["titles"] if titles is None else titles
+    if enabled:
+        if not core_activity.enable(titles):
+            log.warning("activity journal: DNS log or browser policy not fully applied")
+    elif current["enabled"]:
+        core_activity.disable()
+    core_activity.set_titles(titles)
+    from . import monitor
+    return monitor.get().activity_status()
+
+
+@action("activity.sync", mutating=False)
+def _activity_sync(p):
+    """Today's summaries right now (the console stores them like the 5-minute pushes)."""
+    from . import monitor
+    mon = monitor.get()
+    return {"days": mon.today(), "status": mon.activity_status()}
+
+
 @action("agent.set_options")
 def _agent_set_options(p):
     from ..compliance import set_options
@@ -1070,8 +1145,20 @@ def _state_hosts():
     }
 
 
+def _state_screentime():
+    from . import monitor
+    return monitor.get().screentime_status()
+
+
+def _state_activity():
+    from . import monitor
+    return monitor.get().activity_status()
+
+
 _SECTIONS = (
     ("system", _state_system),
+    ("screentime", _state_screentime),
+    ("activity", _state_activity),
     ("parental", _state_parental),
     ("cf_family", _state_cf),
     ("browser_policies", _state_browser_policies),

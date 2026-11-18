@@ -19,7 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 sys.modules.setdefault("winreg", types.ModuleType("winreg"))  # catalogs only, nothing touches the registry
 
-from hosts_editor import compliance, core_networks  # noqa: E402
+from hosts_editor import compliance, core_activity, core_networks, core_screentime  # noqa: E402
 from hosts_editor.core_applocker import clean_exception, summarize_events  # noqa: E402
 from hosts_editor.core import _parse_line  # noqa: E402
 from hosts_editor.core_antispy import ITEMS  # noqa: E402
@@ -100,6 +100,99 @@ class DemoPC:
         self.safesearch = {"google": False, "youtube": "off", "bing": False, "ips": {}}
         self.extensions = {"mode": "proxy", "chromium": [], "firefox": []}
         self.child_private_off = False
+        # Phase 3: screen time (real decision engine) and activity journal (real aggregator, simulated input)
+        data_dir = tempfile.mkdtemp(prefix=f"hots-demo-activity-{hostname}-")
+        core_screentime.POLICY_FILE = os.path.join(data_dir, "screentime_policy.json")
+        core_screentime.USAGE_FILE = os.path.join(data_dir, "screentime_usage.json")
+        self.enforcer = core_screentime.Enforcer()
+        self.journal = core_activity.Journal(os.path.join(data_dir, "activity"))
+        self.activity = {"enabled": False, "titles": True}
+        self.simulated = set()
+        self.session_locked = False
+
+    def kids(self):
+        return [{"sid": a["sid"], "name": a["full_name"] or a["name"]} for a in self.accounts if a["sid"] in self.children]
+
+    def simulate(self, sid: str, now: float):
+        """A believable day of use for a child account (the journal itself is the real one)."""
+        j = self.journal
+        j.names[sid] = next((k["name"] for k in self.kids() if k["sid"] == sid), sid)
+        chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        plan = [  # (start, minutes, exe, title, sites)
+            (-26 * 3600, 35, chrome, "Pronote - Espace Élèves - Google Chrome", ["index-education.net"]),
+            (-25.3 * 3600, 50, r"C:\Users\Lea\AppData\Roaming\.minecraft\javaw.exe", "Minecraft 1.21", []),
+            (-5 * 3600, 25, chrome, "Pronote - Cahier de textes - Google Chrome", ["index-education.net"]),
+            (-4.5 * 3600, 20, r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE",
+             "Exposé histoire.docx - Word", []),
+            (-4.1 * 3600, 30, chrome, "Révolution française — Wikipédia - Google Chrome", ["wikipedia.org"]),
+            (-2 * 3600, 45, chrome, "Minecraft : les meilleures maps - YouTube - Google Chrome", ["youtube.com"]),
+            (-1.2 * 3600, 25, r"C:\Users\Lea\AppData\Local\Discord\app-1.0.9\Discord.exe", "#général - Discord",
+             ["discord.com"]),
+            (-0.7 * 3600, 30, r"C:\Users\Lea\AppData\Roaming\.minecraft\javaw.exe", "Minecraft 1.21", []),
+            (-0.2 * 3600, 10, chrome, "Mathématiques - Kartable - Google Chrome", ["kartable.fr"]),
+        ]
+        domains = {"index-education.net": "0123456b.index-education.net", "wikipedia.org": "fr.wikipedia.org",
+                   "youtube.com": "rr4---sn-25ge7nsd.googlevideo.com", "discord.com": "gateway.discord.gg",
+                   "kartable.fr": "www.kartable.fr"}
+        for start, minutes, exe, title, sites in plan:
+            t0 = now + start
+            for i in range(int(minutes * 60 / 5) + 1):
+                t = t0 + i * 5
+                if t > now:
+                    break
+                j.add_sample(77, sid, {"t": t, "exe": exe, "title": title, "idle": 3})
+                if sites and i % 12 == 0:
+                    for site in sites:
+                        j.add_dns(sid, {"name": domains[site], "t": t, "results": "93.184.216.34;", "status": 0},
+                                  "chrome.exe", {})
+            j._last_sample.pop(77, None)
+        index = {"www.tiktok.com": "TikTok", "www.instagram.com": "Instagram"}
+        for offset, name, res in ((-2.2, "www.tiktok.com", "0.0.0.0;"), (-2.15, "www.tiktok.com", "0.0.0.0;"),
+                                  (-1.9, "www.instagram.com", "0.0.0.0;"), (-0.6, "casino-en-ligne.example", "0.0.0.0;"),
+                                  (-0.5, "www.tiktok.com", "0.0.0.0;")):
+            j.add_dns(sid, {"name": name, "t": now + offset * 3600, "results": res, "status": 0}, "chrome.exe", index)
+        j.add_blocked_program(sid, r"C:\Users\Lea\Downloads\FirefoxPortable\FirefoxPortable.exe", now - 3 * 3600)
+        j.add_blocked_program(sid, r"E:\psiphon3.exe", now - 1.5 * 3600)
+        j.add_event(sid, now - 1.5 * 3600, "helper", "Le suivi d'activité a été fermé (redémarré)")
+        day = time.strftime("%Y-%m-%d", time.localtime(now))
+        self.enforcer._add(sid, now, max(0, j.get(day, sid)["active_s"] - self.enforcer.used(sid, now)))
+        yday = time.strftime("%Y-%m-%d", time.localtime(now - 86400))
+        self.enforcer._add(sid, now - 86400, j.get(yday, sid)["active_s"])
+        j.set_screen(sid, yday, j.get(yday, sid)["active_s"])
+
+    def tick(self):
+        """Every few seconds: the child is "using" the PC; screen time is enforced (messages printed)."""
+        now = time.time()
+        with self.lock:
+            kids = self.kids()
+            if self.activity["enabled"]:
+                for k in kids:
+                    if k["sid"] not in self.simulated:
+                        self.simulated.add(k["sid"])
+                        self.simulate(k["sid"], now)
+            sessions = [{"id": 2, "sid": k["sid"], "active": True, "locked": self.session_locked, "idle": 4}
+                        for k in kids[:1]]
+            for action in self.enforcer.tick(sessions, core_screentime.load_policies(), now):
+                if action[0] == "lock":
+                    self.session_locked = True
+                print("[temps d'écran]", action[0], *action[2:], flush=True)
+            if self.session_locked and sessions:
+                ev = core_screentime.evaluate(core_screentime.load_policies().get(sessions[0]["sid"]) or {},
+                                              self.enforcer.used(sessions[0]["sid"], now),
+                                              core_screentime.datetime.fromtimestamp(now))
+                if ev["allowed"]:
+                    self.session_locked = False  # the child signs in again once allowed
+            for ev in self.enforcer.events:
+                if not ev.get("_logged"):
+                    ev["_logged"] = True
+                    self.journal.add_event(ev["sid"], ev["t"], ev["kind"], ev["text"])
+            day = time.strftime("%Y-%m-%d", time.localtime(now))
+            for k in kids:
+                if self.activity["enabled"] or (core_screentime.load_policies().get(k["sid"]) or {}).get("enabled"):
+                    self.journal.set_screen(k["sid"], day, self.enforcer.used(k["sid"], now))
+
+    def _screentime(self, sid):
+        return next((x for x in core_screentime.status(self.kids(), self.enforcer) if x["sid"] == sid), {})
 
     def _networks(self):
         plan = core_networks.decide([self.wifi], cf_ok=False, policy=self.net_policy, state=self.net_state,
@@ -207,6 +300,8 @@ class DemoPC:
                      "active": None if it["kind"] == "hkcu_reg" else self.privacy[it["id"]],
                      "missing": it["id"] == "medium_task_usbceip"}
                     for it in ITEMS if it["level"] == lvl]} for lvl in ("basic", "medium", "advanced", "extra")]},
+                "screentime": core_screentime.status(self.kids(), self.enforcer),
+                "activity": dict(self.activity, helpers=1 if self.activity["enabled"] else 0, children=self.kids()),
                 "hosts": {"path": r"C:\Windows\System32\drivers\etc\hosts", "size": len("\n".join(self.hosts)),
                           "lines": len(entries), "active_entries": sum(1 for e in entries if e["enabled"] is True),
                           "disabled_entries": sum(1 for e in entries if e["enabled"] is False), "backups": len(self.backups)},
@@ -232,6 +327,31 @@ class DemoPC:
         ok = lambda result=None, mutating=True: (True, result or {}, "", mutating)  # noqa: E731
         if action == "agent.ping":
             return ok({"pong": True}, False)
+        if action.startswith("screentime."):
+            if p.get("sid") not in self.children:
+                return False, None, "Ce compte n'est pas marqué comme compte enfant (onglet Sécurité).", True
+            try:
+                if action == "screentime.set":
+                    core_screentime.set_policy(p["sid"], p.get("policy"))
+                elif action == "screentime.bonus":
+                    core_screentime.add_bonus(p["sid"], int(p["minutes"]))
+                else:
+                    core_screentime.set_pause(p["sid"], int(p["minutes"]))
+            except ValueError as e:
+                return False, None, f"Réglage refusé : {e}", True
+            self.tick()
+            return ok(self._screentime(p["sid"]))
+        if action == "activity.set":
+            self.activity = {"enabled": bool(p["enabled"]),
+                             "titles": self.activity["titles"] if p.get("titles") is None else bool(p["titles"])}
+            self.tick()
+            return ok(dict(self.activity, helpers=1, children=self.kids()))
+        if action == "activity.sync":
+            day = time.strftime("%Y-%m-%d")
+            days = [self.journal.summary(self.journal.get(day, k["sid"])) for k in self.kids()]
+            days += [x for x in self.journal.outbox(limit=10) if x["day"] != day]
+            return ok({"days": days,
+                       "status": dict(self.activity, children=self.kids())}, False)
         if action == "get_state":
             return ok(self.state(lang), False)
         if action == "parental.set":
@@ -407,7 +527,8 @@ def main():
                 pc.net_policy = policy
                 agent._state_due = True
 
-    agent = Agent(cfg, executor=pc.execute, state_builder=pc.state, info_builder=pc.info, on_config=on_config)
+    agent = Agent(cfg, executor=pc.execute, state_builder=pc.state, info_builder=pc.info, on_config=on_config,
+                  periodic_fast=lambda a: pc.tick(), outbox=pc.journal.outbox, outbox_ack=pc.journal.ack)
     try:
         agent.run()
     except KeyboardInterrupt:

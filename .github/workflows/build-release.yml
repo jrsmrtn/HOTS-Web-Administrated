@@ -95,6 +95,9 @@ jobs:
             --include-module=hosts_editor.core_applocker `
             --include-module=hosts_editor.core_hardening `
             --include-module=hosts_editor.core_safesearch `
+            --include-module=hosts_editor.core_screentime `
+            --include-module=hosts_editor.core_sessions `
+            --include-module=hosts_editor.core_activity `
             --include-package-data=certifi `
             --enable-plugin=pyside6 `
             --nofollow-import-to=PIL `

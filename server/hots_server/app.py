@@ -14,7 +14,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import __version__, alerts, db, networks, security, settings
+from . import __version__, activity, alerts, db, networks, security, settings
 
 log = logging.getLogger("hots_server")
 
@@ -67,9 +67,15 @@ ACTIONS = {
     "child_browsing.set": True,
     "network_hardening.set": True,
     "safesearch.set": True,
+    "screentime.set": True,
+    "screentime.bonus": True,
+    "screentime.pause": True,
+    "activity.set": True,
+    "activity.sync": False,
 }
 # Large read-only results are dropped from the history after a day.
-BULKY_RESULTS = ("get_state", "hosts.read", "apps.list_installed", "hosts.backups", "compliance.check")
+BULKY_RESULTS = ("get_state", "hosts.read", "apps.list_installed", "hosts.backups", "compliance.check",
+                 "activity.sync")
 TERMINAL = ("done", "error", "expired", "cancelled")
 
 SENT_TIMEOUT = 15 * 60
@@ -543,6 +549,12 @@ async def create_command(request: Request):
     return JSONResponse(command_public(cmd), status_code=201)
 
 
+async def get_activity(request: Request):
+    user = current_user(request)
+    row = own_device(user, request.path_params["device_id"])
+    return JSONResponse(activity.for_device(row["id"], request.query_params.get("day", "")))
+
+
 async def list_commands(request: Request):
     user = current_user(request)
     row = own_device(user, request.path_params["device_id"])
@@ -1001,6 +1013,8 @@ def _store_results(device, results) -> None:
             if ok and cmd and cmd["action"] == "get_state" and isinstance(result, dict):
                 db.ex("UPDATE devices SET state_json = ?, state_at = ? WHERE id = ?",
                       (db.dumps(result), now, device["id"]))
+            if ok and cmd and cmd["action"] == "activity.sync" and isinstance(result, dict):
+                activity.store(device["id"], result.get("days"))
             hub.wake_command(cid)
 
 
@@ -1078,6 +1092,8 @@ async def agent_poll(request: Request):
     with db.transaction():
         _store_info_and_state(device, data, ip)
         _store_results(device, data.get("results"))
+        if data.get("activity"):
+            activity.store(device["id"], data.get("activity"))
     lang = settings.DEFAULT_AGENT_LANG
     deadline = time.monotonic() + settings.POLL_HOLD_SECONDS
     commands = []
@@ -1147,6 +1163,7 @@ def maintenance_once() -> None:
           f"AND action IN ({','.join('?' * len(BULKY_RESULTS))})", (now - 86400, *BULKY_RESULTS))
     db.ex("DELETE FROM commands WHERE created_at < ?", (now - HISTORY_DAYS * 86400,))
     db.ex("DELETE FROM events WHERE created_at < ?", (now - 365 * 86400,))
+    activity.purge(now)
     db.ex("DELETE FROM sessions WHERE expires_at < ?", (now,))
 
 
@@ -1273,6 +1290,7 @@ routes = [
     Route("/api/devices/{device_id}", delete_device, methods=["DELETE"]),
     Route("/api/devices/{device_id}/commands", create_command, methods=["POST"]),
     Route("/api/devices/{device_id}/commands", list_commands),
+    Route("/api/devices/{device_id}/activity", get_activity),
     Route(f"/api/commands/{_int_path('command_id')}", get_command),
     Route(f"/api/commands/{_int_path('command_id')}/cancel", cancel_command, methods=["POST"]),
     Route("/api/enroll-codes", list_codes),

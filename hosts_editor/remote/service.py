@@ -6,6 +6,7 @@
   --agent-stop                            stop the running agent (before files are replaced)
   --agent-uninstall                       stop, unregister, notify the server, forget credentials
   --agent-applocker-off                   emergency: lift the anti-portable mode (admin prompt)
+  --agent-user-helper                     started by the agent in a child's session (activity journal)
 
 The agent runs as a scheduled task rather than a Windows service: no extra dependency,
 restart-on-failure handled by the Task Scheduler, and a standard (child) account cannot stop it.
@@ -320,7 +321,13 @@ def on_console_config(agent, resp: dict) -> None:
             agent.run_fast_checks_soon()
 
 
-def run_agent() -> int:
+def helper_command(launcher_script: str = "") -> str:
+    """Command line of the activity helper, started by the agent in the children's sessions."""
+    program, arguments = agent_command(launcher_script)
+    return f'"{program}" ' + arguments.replace("--agent-run", "--agent-user-helper")
+
+
+def run_agent(launcher_script: str = "") -> int:
     setup_logging()
     if not config.load():
         log.info("this PC is not connected to a console: nothing to do")
@@ -350,9 +357,12 @@ def run_agent() -> int:
             log.info("this PC is not connected to a console: nothing to do")
             config.write_status(connected=False)
             return EXIT_OK
+        from . import monitor
+        mon = monitor.get()
+        mon.start(helper_command(launcher_script))
         agent = Agent(cfg, executor=actions.execute, state_builder=_state_builder,
                       info_builder=actions.system_info, periodic=periodic_checks, periodic_fast=fast_checks,
-                      on_config=on_console_config)
+                      on_config=on_console_config, outbox=mon.journal.outbox, outbox_ack=mon.journal.ack)
         try:
             agent.run()
         except Exception:
@@ -360,6 +370,8 @@ def run_agent() -> int:
             time.sleep(30)
             continue
         if agent.revoked:
+            mon.stop()
+            _activity_off()
             return EXIT_OK
 
 
@@ -399,6 +411,7 @@ def disconnect(notify_server: bool = True) -> None:
     if cfg and notify_server:
         goodbye(cfg)
     config.clear()
+    _activity_off()
     try:
         from ..core_netblock import NetBlockManager
         if NetBlockManager.exclusions_outdated():
@@ -407,11 +420,27 @@ def disconnect(notify_server: bool = True) -> None:
         log.exception("could not refresh the Internet block exclusions")
 
 
+def _activity_off() -> None:
+    """Remote administration ends: the activity journal (a console feature) restores the DNS log
+    and browser settings it changed. Screen time stops with the agent."""
+    try:
+        from ..core_activity import disable, load_settings
+        data = load_settings()
+        if data["enabled"] or data["originals"]:
+            disable()
+    except Exception:
+        log.exception("activity journal settings could not be restored")
+
+
 def main(argv: list, launcher_script: str = "") -> int:
     """Dispatch --agent-* flags. Returns the process exit code."""
     flag = argv[1] if len(argv) > 1 else ""
     if flag == "--agent-run":
-        return run_agent()
+        return run_agent(launcher_script)
+    if flag == "--agent-user-helper":
+        # Runs with a child's rights: no log file (ProgramData is not writable), nothing else.
+        from ..core_activity import run_user_helper
+        return run_user_helper()
     setup_logging()
     if flag == "--agent-enroll" and len(argv) >= 4:
         code, message = connect(argv[2], argv[3], launcher_script)

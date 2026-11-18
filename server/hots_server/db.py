@@ -113,6 +113,16 @@ CREATE TABLE IF NOT EXISTS alerts (
     emailed_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_open ON alerts(account_id, resolved_at);
+CREATE TABLE IF NOT EXISTS activity_days (
+    device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    day TEXT NOT NULL,
+    sid TEXT NOT NULL,
+    user_name TEXT NOT NULL DEFAULT '',
+    screen_s INTEGER NOT NULL DEFAULT 0,
+    data_json TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (device_id, day, sid)
+);
 """
 
 # Columns added after the first release (ALTER TABLE on existing databases).
