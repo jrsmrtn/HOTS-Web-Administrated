@@ -373,6 +373,33 @@ WorkingDirectory=${INSTALL_DIR}/app
 ExecStart=${INSTALL_DIR}/venv/bin/python -m hots_server backup ${BACKUP_DIR} --keep 14
 EOF
 
+  # One-click update from the Administration page: the console (unprivileged) drops a request file,
+  # this root unit downloads the release, checks its SHA-256 and runs deploy.sh --update --yes.
+  cat >"/etc/systemd/system/${SERVICE}-update.path" <<EOF
+[Unit]
+Description=Mise à jour de la ${APP_NAME} demandée depuis la console
+
+[Path]
+PathExists=${DATA_DIR}/update-request
+Unit=${SERVICE}-update.service
+
+[Install]
+WantedBy=paths.target
+EOF
+
+  cat >"/etc/systemd/system/${SERVICE}-update.service" <<EOF
+[Unit]
+Description=Mise à jour de la ${APP_NAME}
+
+[Service]
+Type=oneshot
+EnvironmentFile=${ENV_FILE}
+WorkingDirectory=${INSTALL_DIR}/app
+ExecStart=${INSTALL_DIR}/venv/bin/python -m hots_server self-update --mode vps --request ${DATA_DIR}/update-request
+ExecStopPost=/bin/rm -f ${DATA_DIR}/update-request
+TimeoutStartSec=40min
+EOF
+
   cat >"/etc/systemd/system/${SERVICE}-backup.timer" <<EOF
 [Unit]
 Description=Sauvegarde quotidienne de la ${APP_NAME}
@@ -426,7 +453,8 @@ EOF
 start_services() {
   ui_step "Démarrage de la console"
   run systemctl daemon-reload
-  run systemctl enable "${SERVICE}" "${SERVICE}-backup.timer"
+  run systemctl enable "${SERVICE}" "${SERVICE}-backup.timer" "${SERVICE}-update.path"
+  run systemctl start "${SERVICE}-update.path" || true
   run systemctl restart "${SERVICE}"
   run systemctl start "${SERVICE}-backup.timer"
   run systemctl enable caddy
@@ -528,9 +556,10 @@ do_uninstall() {
     keep_data=1
   fi
   if [[ -x "${CLI}" ]]; then "${CLI}" backup "${BACKUP_DIR}" --keep 30 >/dev/null 2>&1 || true; fi
-  systemctl disable --now "${SERVICE}" "${SERVICE}-backup.timer" >/dev/null 2>&1 || true
+  systemctl disable --now "${SERVICE}" "${SERVICE}-backup.timer" "${SERVICE}-update.path" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/${SERVICE}.service" "/etc/systemd/system/${SERVICE}-backup.service" \
-        "/etc/systemd/system/${SERVICE}-backup.timer" "${CLI}" "${CADDY_SITE_FILE}"
+        "/etc/systemd/system/${SERVICE}-backup.timer" "/etc/systemd/system/${SERVICE}-update.path" \
+        "/etc/systemd/system/${SERVICE}-update.service" "${CLI}" "${CADDY_SITE_FILE}"
   systemctl daemon-reload
   systemctl reload caddy >/dev/null 2>&1 || true
   rm -rf -- "${INSTALL_DIR}"

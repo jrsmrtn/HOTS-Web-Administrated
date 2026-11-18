@@ -2120,6 +2120,8 @@ async function viewAdmin(_m, token) {
       })),
     h('div', { class: 'grid cols-3' }, stat(accounts.length, 'comptes clients', 'users'), stat(totalPc, 'PC administrés', 'monitor'), stat(online, 'PC en ligne', 'globe')),
     h('div', { style: { height: '16px' } }),
+    updateCard(token),
+    h('div', { style: { height: '16px' } }),
     card('Comptes clients', 'users', null, h('div', { class: 'table-wrap' }, h('table', null,
       h('thead', null, h('tr', null, h('th', null, 'Compte'), h('th', null, 'PC en ligne'), h('th', null, 'Créé le'), h('th', null, 'État'), h('th', null, ''))),
       h('tbody', null, rows)))),
@@ -2138,6 +2140,82 @@ async function viewAdmin(_m, token) {
       h('p', { class: 'muted small' }, `Version du serveur : ${conf.version}`)),
     h('div', { style: { height: '16px' } }),
     smtpCard(conf.smtp || {}));
+}
+
+/** Mise à jour du serveur en un clic (Administration). */
+function updateCard(token) {
+  const body = h('div', null, h('p', { class: 'small muted' }, h('span', { class: 'spinner' }), ' Recherche de la dernière version…'));
+  let polling = false;
+  let lastOk = null;
+  const fmtState = (st) => (st && st.step ? st.step : 'Préparation');
+  const logBox = (text) => (text ? h('details', null, h('summary', null, 'Journal de la mise à jour'), h('pre', { class: 'log' }, text)) : null);
+  const paint = (u) => {
+    lastOk = u;
+    const st = u.status || {};
+    const recentDone = st.state === 'done' && st.version === u.current && Date.now() / 1000 - (st.done || 0) < 86400;
+    const latest = u.latest;
+    put(clear(body),
+      h('div', { class: 'update-versions' },
+        h('div', null, h('small', { class: 'muted' }, 'Version installée'), h('strong', null, u.current)),
+        h('div', null, h('small', { class: 'muted' }, 'Dernière version publiée'),
+          latest ? h('strong', null, latest.tag, ' ', h('a', { href: latest.url, target: '_blank', rel: 'noopener noreferrer', class: 'small' }, 'nouveautés')) : h('strong', null, '—'))),
+      u.error ? banner('warn', 'alert', h('p', null, u.error)) : null,
+      u.running ? banner('info', 'refresh', h('p', null, h('strong', null, fmtState(st)), '…'),
+        h('p', { class: 'small' }, 'La console redémarre à la fin (environ une minute). Cette page se rechargera toute seule.')) : null,
+      !u.running && st.state === 'error' ? banner('danger', 'alert', h('p', null, h('strong', null, 'La mise à jour a échoué : '), st.error || 'erreur inconnue'),
+        h('p', { class: 'small' }, 'La console continue de fonctionner avec la version installée.')) : null,
+      recentDone ? banner('ok', 'check', h('p', null, `Mise à jour vers ${st.version} terminée.`)) : null,
+      !u.running && u.available && u.install.mode === 'manual' ? banner('info', 'info', h('p', null, u.install.reason)) : null,
+      h('div', { class: 'row', style: { 'margin-top': '10px' } },
+        !u.running && u.available && u.install.mode !== 'manual' ? btn(`Mettre à jour vers ${latest.tag}`, {
+          kind: 'primary', icon: 'download', onclick: async () => {
+            const ok = await confirmDialog(`Installer la version ${latest.tag} ? La base de données est sauvegardée d'abord ; la console sera indisponible environ une minute pendant le redémarrage (les PC se reconnectent tout seuls).`,
+              { title: 'Mettre à jour la console', ok: 'Mettre à jour', iconName: 'download' });
+            if (!ok) return;
+            await api('POST', '/api/admin/update', { tag: latest.tag });
+            toast('Mise à jour lancée', 'ok');
+            startPolling();
+            await load(false);
+          },
+        }) : null,
+        !u.running && !u.available && latest ? badge('La console est à jour', 'ok', 'check') : null,
+        h('div', { class: 'spacer' }),
+        !u.running ? btn('Vérifier maintenant', { small: true, icon: 'refresh', onclick: () => load(true) }) : null),
+      st.state === 'error' || u.running ? logBox(u.log) : null,
+      h('p', { class: 'small muted' }, 'Téléchargée depuis ', h('a', { href: `https://github.com/${u.repo}/releases`, target: '_blank', rel: 'noopener noreferrer' }, `github.com/${u.repo}`),
+        ', vérifiée avec son empreinte SHA-256, installée en gardant comptes, PC et réglages.'));
+    if (u.running) startPolling();
+  };
+  const load = async (refresh) => {
+    const u = await api('GET', `/api/admin/update${refresh ? '?refresh=1' : ''}`);
+    if (token === S.navToken) paint(u);
+    return u;
+  };
+  const startPolling = () => {
+    if (polling) return;
+    polling = true;
+    const target = lastOk && lastOk.latest ? lastOk.latest.tag : null;
+    every(3000, async () => {
+      if (!polling) return;
+      try {
+        const u = await api('GET', '/api/admin/update');
+        if (u.status && u.status.state === 'done' && (!target || u.current === target)) {
+          polling = false;
+          toast(`Console mise à jour : ${u.current}`, 'ok');
+          setTimeout(() => location.reload(), 1200);
+          return;
+        }
+        if (!u.running) polling = false;
+        paint(u);
+      } catch (e) {
+        if (e.status === 404) { polling = false; location.reload(); return; } // nouvelle version sans ce suivi
+        // console en cours de redémarrage : on réessaie
+        if (lastOk) put(clear(body), banner('info', 'refresh', h('p', null, h('strong', null, 'Redémarrage de la console…')), h('p', { class: 'small' }, 'Cette page se rechargera toute seule.')));
+      }
+    });
+  };
+  load(false).catch((e) => put(clear(body), banner('warn', 'alert', h('p', null, e.message))));
+  return card('Mise à jour du serveur', 'download', null, body);
 }
 
 function smtpCard(smtp) {

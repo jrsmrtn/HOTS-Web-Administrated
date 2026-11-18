@@ -115,6 +115,7 @@ démarrage automatique, la surveillance et la sauvegarde.
 </table>
 
 À la fin, un **lien** s'affiche : ouvrez-le pour créer le compte administrateur.
+Ensuite, les **mises à jour se font en un clic** depuis la page Administration de la console.
 
 ### 2. Installer sur chaque PC à protéger
 

@@ -4,6 +4,8 @@
   setup-link                                 print the setup token if no admin exists yet
   reset-password EMAIL                       set a new random password for a user (printed once)
   set-email OLD_EMAIL NEW_EMAIL              change the e-mail (login) of a user
+  self-update --mode shared|vps [--tag vX.Y.Z] [--request FILE]
+                                             update from the GitHub release (used by the Administration page)
   info                                       show accounts / PCs counts
   backup DIR [--keep N]                      consistent copy of the database (keeps the N newest)
 """
@@ -65,6 +67,11 @@ def _set_email(args):
     return 0
 
 
+def _self_update(args):
+    from . import updater
+    return updater.run_update(args.mode, args.tag or "", args.request or "")
+
+
 def _info(args):
     from . import db, settings
     db.init()
@@ -113,6 +120,11 @@ def main(argv=None) -> int:
     p.add_argument("old")
     p.add_argument("new")
     p.set_defaults(func=_set_email)
+    p = sub.add_parser("self-update")
+    p.add_argument("--mode", choices=("shared", "vps"), required=True)
+    p.add_argument("--tag", default="")
+    p.add_argument("--request", default="")
+    p.set_defaults(func=_self_update)
     sub.add_parser("info").set_defaults(func=_info)
     p = sub.add_parser("backup")
     p.add_argument("dir")

@@ -14,7 +14,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import __version__, activity, alerts, db, networks, security, settings
+from . import activity, alerts, db, networks, security, settings, updater
 
 log = logging.getLogger("hots_server")
 
@@ -246,7 +246,7 @@ def settings_public() -> dict:
     return {"server_name": db.get_meta("server_name", "Console HOTS Hosts"),
             "registration_open": db.get_meta("registration_open", "0") == "1",
             "download_url": db.get_meta("download_url") or DEFAULT_DOWNLOAD_URL,
-            "version": __version__}
+            "version": updater.current_version()}
 
 
 # --- sessions ----------------------------------------------------------------------------------------
@@ -922,6 +922,41 @@ async def admin_set_user_password(request: Request):
     return JSONResponse({"ok": True})
 
 
+async def admin_update(request: Request):
+    """GET: installed / latest version and progress. POST {tag}: start the one-click update."""
+    admin = require_superadmin(request)
+    if request.method == "POST":
+        data = await read_json(request)
+        tag = data.get("tag") if isinstance(data.get("tag"), str) else ""
+        try:
+            latest = await asyncio.to_thread(updater.latest_release, True)
+        except Exception as e:
+            raise ApiError(502, f"Impossible de joindre GitHub : {e}")
+        if tag != latest["tag"]:
+            raise ApiError(400, "Seule la dernière version publiée peut être installée.")
+        if not updater.newer(tag, updater.current_version()):
+            raise ApiError(400, "La console est déjà à jour.")
+        try:
+            status = updater.request_update(tag, admin["email"])
+        except (RuntimeError, ValueError) as e:
+            raise ApiError(409, str(e))
+        db.log_event("update", f"Mise à jour de la console vers {tag} demandée", admin["account_id"], admin["id"],
+                     ip=client_ip(request))
+        return JSONResponse({"ok": True, "status": status})
+    out = {"current": updater.current_version(), "repo": updater.REPO, "install": updater.install_mode(),
+           "status": updater.read_status(), "latest": None, "error": "", "log": ""}
+    out["running"] = updater.is_running(out["status"])
+    if out["status"].get("state") in ("error", "done", "running"):
+        out["log"] = updater.log_tail()
+    try:
+        out["latest"] = await asyncio.to_thread(updater.latest_release, request.query_params.get("refresh") == "1")
+        out["available"] = updater.newer(out["latest"]["tag"], out["current"])
+    except Exception as e:
+        out["error"] = f"Impossible de vérifier la dernière version sur GitHub ({e})."
+        out["available"] = False
+    return JSONResponse(out)
+
+
 async def admin_settings(request: Request):
     require_superadmin(request)
     if request.method == "PATCH":
@@ -1179,7 +1214,7 @@ async def agent_goodbye(request: Request):
 
 async def health(request: Request):
     db.q1("SELECT 1")
-    return JSONResponse({"ok": True, "version": __version__})
+    return JSONResponse({"ok": True, "version": updater.current_version()})
 
 
 async def index(request: Request):
@@ -1352,6 +1387,7 @@ routes = [
     Route(f"/api/admin/users/{_int_path('user_id')}/password", admin_set_user_password, methods=["POST"]),
     Route(f"/api/admin/users/{_int_path('user_id')}/email", admin_set_user_email, methods=["POST"]),
     Route("/api/admin/settings", admin_settings, methods=["GET", "PATCH"]),
+    Route("/api/admin/update", admin_update, methods=["GET", "POST"]),
     Route("/api/agent/enroll", agent_enroll, methods=["POST"]),
     Route("/api/agent/poll", agent_poll, methods=["POST"]),
     Route("/api/agent/results", agent_results, methods=["POST"]),

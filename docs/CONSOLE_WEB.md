@@ -378,6 +378,27 @@ consulter le journal d'activité (connexions, PC ajoutés…).
 
 ## 6. Mises à jour, sauvegardes, désinstallation
 
+### Mettre à jour la console en un clic
+
+**Administration → Mise à jour du serveur** affiche la version installée et la dernière version
+publiée sur GitHub. Le bouton **« Mettre à jour vers vX.Y.Z »** :
+
+1. télécharge la nouvelle version depuis la page Releases du projet et vérifie son empreinte
+   SHA-256 (`SHA256SUMS.txt`) : un fichier abîmé ou modifié est refusé ;
+2. sauvegarde la base de données ;
+3. installe la nouvelle version en gardant comptes, PC et réglages, puis redémarre la console
+   (moins d'une minute ; les PC se reconnectent seuls). La page se recharge toute seule.
+
+En cas d'échec, la console continue avec l'ancienne version et la carte affiche l'erreur et le
+journal. Le bouton n'apparaît que pour le compte administrateur du serveur.
+
+> **Première fois** : la mise à jour en un clic arrive avec la version 2.8.0. Une console plus
+> ancienne se met à jour une dernière fois « à la main » : sur un VPS `sudo /opt/hots-console/deploy.sh`
+> puis « Mettre à jour », sur un hébergement mutualisé décompresser le nouveau zip et relancer
+> `bash install-mutualise.sh`. Ensuite, tout se fait depuis la console.
+
+### Gestion du serveur en ligne de commande (VPS)
+
 Le menu de gestion du serveur :
 
 ```bash
@@ -386,7 +407,7 @@ sudo /opt/hots-console/deploy.sh
 
 | Besoin | Comment |
 |---|---|
-| **Mettre à jour la console** | Téléchargez et dézippez la nouvelle version, puis `sudo ./deploy.sh` → « Mettre à jour ». Une sauvegarde est faite avant ; comptes et PC sont conservés. |
+| **Mettre à jour la console** | En un clic depuis **Administration** (voir ci-dessus). Ou : téléchargez et dézippez la nouvelle version, puis `sudo ./deploy.sh` → « Mettre à jour ». Une sauvegarde est faite avant ; comptes et PC sont conservés. |
 | **Mettre à jour les PC** | HOTS Hosts → Options → Mises à jour (il télécharge l'installateur de ce fork), ou relancez le nouvel installateur. La liaison à la console est conservée. |
 | **Sauvegarde manuelle** | Menu → « Faire une sauvegarde maintenant » (ou `sudo hots-server backup /var/backups/hots-console`). |
 | **Restaurer une sauvegarde** | `sudo systemctl stop hots-console`, copiez le fichier `hots-AAAAMMJJ-HHMMSS.db` sur `/var/lib/hots-console/hots.db` (propriétaire `hots`), puis `sudo systemctl start hots-console`. |
