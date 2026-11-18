@@ -3,6 +3,7 @@
   serve [--host 127.0.0.1] [--port 8080]   run the web server (used by systemd)
   setup-link                                 print the setup token if no admin exists yet
   reset-password EMAIL                       set a new random password for a user (printed once)
+  set-email OLD_EMAIL NEW_EMAIL              change the e-mail (login) of a user
   info                                       show accounts / PCs counts
   backup DIR [--keep N]                      consistent copy of the database (keeps the N newest)
 """
@@ -44,6 +45,23 @@ def _reset_password(args):
     db.ex("DELETE FROM sessions WHERE user_id = ?", (row["id"],))
     db.log_event("password_reset", f"Mot de passe réinitialisé en ligne de commande : {row['email']}", row["account_id"])
     print(password)
+    return 0
+
+
+def _set_email(args):
+    from . import app, db
+    db.init()
+    row = db.q1("SELECT * FROM users WHERE email = ?", (args.old.strip().lower(),))
+    if row is None:
+        print(f"Utilisateur introuvable : {args.old}", file=sys.stderr)
+        return 1
+    try:
+        email = app._set_email(row["id"], args.new, row["email"])
+    except app.ApiError as e:
+        print(e.detail, file=sys.stderr)
+        return 1
+    db.log_event("email", f"Adresse e-mail modifiée en ligne de commande : {row['email']} → {email}", row["account_id"])
+    print(email)
     return 0
 
 
@@ -91,6 +109,10 @@ def main(argv=None) -> int:
     p = sub.add_parser("reset-password")
     p.add_argument("email")
     p.set_defaults(func=_reset_password)
+    p = sub.add_parser("set-email")
+    p.add_argument("old")
+    p.add_argument("new")
+    p.set_defaults(func=_set_email)
     sub.add_parser("info").set_defaults(func=_info)
     p = sub.add_parser("backup")
     p.add_argument("dir")

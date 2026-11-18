@@ -137,7 +137,7 @@ Sans questions : `bash install-mutualise.sh --domain console.mondomaine.fr --yes
 (autres options : `--webroot DOSSIER`, `--port N`, `--no-htaccess`, `--no-cron`).
 
 **Commandes ensuite** (`~/hots-console/hots …`) : `status`, `restart`, `logs`, `setup-link`,
-`reset-password EMAIL`, `backup`, `uninstall`. **Mise à jour** : décompressez le nouveau zip et
+`reset-password EMAIL`, `set-email ANCIENNE NOUVELLE`, `backup`, `uninstall`. **Mise à jour** : décompressez le nouveau zip et
 relancez `bash install-mutualise.sh` (base, réglages et port conservés).
 
 <details>
@@ -391,6 +391,7 @@ sudo /opt/hots-console/deploy.sh
 | **Sauvegarde manuelle** | Menu → « Faire une sauvegarde maintenant » (ou `sudo hots-server backup /var/backups/hots-console`). |
 | **Restaurer une sauvegarde** | `sudo systemctl stop hots-console`, copiez le fichier `hots-AAAAMMJJ-HHMMSS.db` sur `/var/lib/hots-console/hots.db` (propriétaire `hots`), puis `sudo systemctl start hots-console`. |
 | **Mot de passe oublié** | Menu → « Réinitialiser le mot de passe d'un utilisateur » (ou `sudo hots-server reset-password e-mail`). |
+| **Changer l'adresse e-mail d'un compte** | Chacun : **Mon compte → Profil → Adresse e-mail → Modifier** (mot de passe demandé). L'administrateur du serveur : **Administration**, bouton ✉️ sur la ligne du compte client. Sans accès à la console : `sudo hots-server set-email ancienne@adresse nouvelle@adresse` (hébergement mutualisé : `~/hots-console/hots set-email ancienne@adresse nouvelle@adresse`). |
 | **Changer d'adresse** | Menu → « Changer l'adresse ». Les PC déjà reliés devront être reliés à nouveau si l'ancienne adresse ne répond plus. |
 | **Désinstaller** | Menu → « Désinstaller » (les données sont conservées par défaut). |
 

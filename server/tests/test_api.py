@@ -209,3 +209,29 @@ def test_behind_htaccess_proxy(client, monkeypatch):
     assert r.status_code == 200 and "<html" in r.text.lower()
     client.get("/api/bootstrap")
     assert db.get_meta("public_url") == "https://console.example.org"
+
+
+def test_change_email(admin):
+    client = admin
+    r = client.post("/api/me/email", json={"email": "nouvelle@example.com", "password": "mauvais"})
+    assert r.status_code == 400 and "Mot de passe" in r.json()["detail"]
+    r = client.post("/api/me/email", json={"email": "pas-une-adresse", "password": "motdepasse-admin"})
+    assert r.status_code == 400
+    r = client.post("/api/me/email", json={"email": " Nouvelle@Example.com ", "password": "motdepasse-admin"})
+    assert r.status_code == 200 and r.json()["email"] == "nouvelle@example.com"
+    assert client.get("/api/bootstrap").json()["user"]["email"] == "nouvelle@example.com"
+    client.post("/api/auth/logout")
+    assert client.post("/api/auth/login", json={"email": "admin@example.com", "password": "motdepasse-admin"}).status_code != 200
+    assert client.post("/api/auth/login", json={"email": "nouvelle@example.com", "password": "motdepasse-admin"}).status_code == 200
+    # the superadmin changes another user's address; an address already in use is refused
+    r = client.post("/api/admin/accounts", json={"account_name": "Famille Durand", "email": "durand@example.com",
+                                                 "password": "motdepasse-durand"})
+    assert r.status_code == 201, r.text
+    durand = [u for a in client.get("/api/admin/accounts").json()["accounts"] for u in a["users"]
+              if u["email"] == "durand@example.com"][0]
+    assert client.post(f"/api/admin/users/{durand['id']}/email", json={"email": "nouvelle@example.com"}).status_code == 409
+    r = client.post(f"/api/admin/users/{durand['id']}/email", json={"email": "durand.parents@example.com"})
+    assert r.status_code == 200
+    client.post("/api/auth/logout")
+    assert client.post("/api/auth/login", json={"email": "durand.parents@example.com", "password": "motdepasse-durand"}).status_code == 200
+    assert client.post(f"/api/admin/users/{durand['id']}/email", json={"email": "x@example.com"}).status_code in (401, 403)

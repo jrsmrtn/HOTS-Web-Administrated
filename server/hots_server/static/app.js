@@ -1895,7 +1895,23 @@ async function viewAccount(_m, token) {
   put(clear(main), 
     h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'Mon compte'), h('p', { class: 'muted' }, acc.account.name))),
     h('div', { class: 'grid cols-2' },
-      card('Profil', 'user', null, field('Votre nom', name), field('Nom du compte', accountName, isOwner ? null : 'Modifiable par le responsable du compte.'),
+      card('Profil', 'user', null,
+        settingRow('Adresse e-mail', `${u.email} — sert à vous connecter et à recevoir les alertes.`, btn('Modifier', {
+          small: true, icon: 'mail', onclick: () => formDialog({
+            title: 'Changer d\'adresse e-mail', iconName: 'mail', submitLabel: 'Changer l\'adresse',
+            intro: h('p', { class: 'small muted' }, `Adresse actuelle : ${u.email}. Vous vous connecterez ensuite avec la nouvelle adresse.`),
+            fields: [
+              { name: 'email', label: 'Nouvelle adresse e-mail', type: 'email', autocomplete: 'email', required: true },
+              { name: 'password', label: 'Votre mot de passe (confirmation)', type: 'password', autocomplete: 'current-password', required: true },
+            ],
+            submit: async (v) => {
+              const r = await api('POST', '/api/me/email', { email: v.email.trim(), password: v.password });
+              toast(`Adresse e-mail changée : ${r.email}`, 'ok');
+              S.boot = null; setTimeout(render, 0);
+            },
+          }),
+        })),
+        field('Votre nom', name), field('Nom du compte', accountName, isOwner ? null : 'Modifiable par le responsable du compte.'),
         h('div', { class: 'row end' }, btn('Enregistrer', {
           kind: 'primary', onclick: async () => {
             const body = { name: name.value.trim() };
@@ -2042,6 +2058,16 @@ async function viewAdmin(_m, token) {
             submit: async (v) => { await api('POST', `/api/admin/users/${v.user}/password`, { password: v.password }); toast('Mot de passe modifié', 'ok'); },
           });
         },
+      }),
+      btn('', {
+        kind: 'ghost', icon: 'mail', label: 'Changer une adresse e-mail', onclick: () => formDialog({
+          title: `Adresse e-mail — ${a.name}`, iconName: 'mail', submitLabel: 'Changer l\'adresse',
+          fields: [
+            { name: 'user', label: 'Utilisateur', type: 'select', value: String(a.users[0].id), options: a.users.map((u) => [String(u.id), u.email]) },
+            { name: 'email', label: 'Nouvelle adresse e-mail', type: 'email', required: true, help: 'La personne se connectera avec cette adresse (mot de passe inchangé).' },
+          ],
+          submit: async (v) => { const r = await api('POST', `/api/admin/users/${v.user}/email`, { email: v.email.trim() }); toast(`Adresse changée : ${r.email}`, 'ok'); setTimeout(render, 0); },
+        }),
       }),
       btn('', {
         kind: 'ghost', icon: 'sliders', label: 'Limite de PC', onclick: () => formDialog({

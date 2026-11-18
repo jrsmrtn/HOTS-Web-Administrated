@@ -387,7 +387,7 @@ EOF
 
   cat >"${CLI}" <<EOF
 #!/bin/sh
-# Outils de la console HOTS Hosts : setup-link | reset-password EMAIL | info | backup DIR
+# Outils de la console HOTS Hosts : setup-link | reset-password EMAIL | set-email ANCIENNE NOUVELLE | info | backup DIR
 set -a; . ${ENV_FILE}; set +a
 cd ${INSTALL_DIR}/app || exit 1
 if [ "\$(id -u)" -ne 0 ]; then echo "Utilisez : sudo hots-server \$*" >&2; exit 1; fi

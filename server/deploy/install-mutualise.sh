@@ -174,7 +174,7 @@ say "Console : https://${DOMAIN}  (service local : 127.0.0.1:${PORT})"
 cat > "${DIR}/hots" <<'EOF'
 #!/usr/bin/env bash
 # Console HOTS Hosts : start | stop | restart | status | logs | setup-link | reset-password EMAIL |
-#                      backup | info | watchdog | uninstall
+#                      set-email ANCIENNE NOUVELLE | backup | info | watchdog | uninstall
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 set -a; . "${DIR}/hots.env"; set +a
@@ -230,6 +230,7 @@ case "${1:-status}" in
     if [ -n "${token}" ] && [ "${token}" != "already-configured" ]; then echo "${HOTS_PUBLIC_URL}/#/setup/${token}"
     else echo "Console déjà configurée : ${HOTS_PUBLIC_URL}"; fi ;;
   reset-password) shift; cli reset-password "$@" ;;
+  set-email) shift; cli set-email "$@" ;;
   info) cli info ;;
   backup) cli backup "${DIR}/backups" --keep 14 ;;
   uninstall)

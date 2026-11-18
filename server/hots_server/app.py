@@ -472,6 +472,44 @@ async def change_password(request: Request):
     return JSONResponse({"ok": True})
 
 
+def _set_email(user_id: int, email, old_email: str) -> str:
+    """Validated, unique new e-mail of a user (login identifier and address for alerts)."""
+    email = (email if isinstance(email, str) else "").strip().lower()
+    if len(email) > 254 or not EMAIL_RE.match(email):
+        raise ApiError(400, "Adresse e-mail invalide.")
+    if email == old_email.lower():
+        raise ApiError(400, "C'est déjà l'adresse de ce compte.")
+    if db.q1("SELECT 1 FROM users WHERE email = ? AND id != ?", (email, user_id)):
+        raise ApiError(409, "Cette adresse est déjà utilisée par un autre compte.")
+    db.ex("UPDATE users SET email = ? WHERE id = ?", (email, user_id))
+    return email
+
+
+async def change_email(request: Request):
+    user = current_user(request)
+    data = await read_json(request)
+    current = data.get("password") if isinstance(data.get("password"), str) else ""
+    if not await asyncio.to_thread(security.verify_password, current, user["password_hash"]):
+        raise ApiError(400, "Mot de passe actuel incorrect.")
+    email = _set_email(user["id"], data.get("email"), user["email"])
+    db.log_event("email", f"Adresse e-mail modifiée : {user['email']} → {email}", user["account_id"], user["id"],
+                 ip=client_ip(request))
+    return JSONResponse({"ok": True, "email": email})
+
+
+async def admin_set_user_email(request: Request):
+    admin = require_superadmin(request)
+    uid = request.path_params["user_id"]
+    target = db.q1("SELECT * FROM users WHERE id = ?", (uid,))
+    if target is None:
+        raise ApiError(404, "Utilisateur introuvable.")
+    data = await read_json(request)
+    email = _set_email(target["id"], data.get("email"), target["email"])
+    db.log_event("email", f"Adresse e-mail modifiée par l'administration : {target['email']} → {email}",
+                 target["account_id"], admin["id"], ip=client_ip(request))
+    return JSONResponse({"ok": True, "email": email})
+
+
 async def update_profile(request: Request):
     user = current_user(request)
     data = await read_json(request)
@@ -1284,6 +1322,7 @@ routes = [
     Route("/api/auth/register", register, methods=["POST"]),
     Route("/api/me/password", change_password, methods=["POST"]),
     Route("/api/me/profile", update_profile, methods=["POST"]),
+    Route("/api/me/email", change_email, methods=["POST"]),
     Route("/api/devices", list_devices),
     Route("/api/devices/{device_id}", get_device),
     Route("/api/devices/{device_id}", patch_device, methods=["PATCH"]),
@@ -1311,6 +1350,7 @@ routes = [
     Route(f"/api/admin/accounts/{_int_path('account_id')}", admin_patch_account, methods=["PATCH"]),
     Route(f"/api/admin/accounts/{_int_path('account_id')}", admin_delete_account, methods=["DELETE"]),
     Route(f"/api/admin/users/{_int_path('user_id')}/password", admin_set_user_password, methods=["POST"]),
+    Route(f"/api/admin/users/{_int_path('user_id')}/email", admin_set_user_email, methods=["POST"]),
     Route("/api/admin/settings", admin_settings, methods=["GET", "PATCH"]),
     Route("/api/agent/enroll", agent_enroll, methods=["POST"]),
     Route("/api/agent/poll", agent_poll, methods=["POST"]),
