@@ -359,6 +359,9 @@ python3 server/tools/demo_agent.py --server https://votre-console --code VOTRE-C
 git tag v2.6.0 && git push origin v2.6.0
 ```
 
+   Ou, sans tag, depuis GitHub : **Actions → Build and Release → Run workflow**, choisissez la
+   branche et saisissez la version (`2.6.0`). Le workflow crée lui-même le tag `v2.6.0`.
+
 3. Le workflow **Build and Release** vérifie les numéros de version, construit
    `HOTS_Hosts_setup.exe` (Windows, Nuitka + Inno Setup, avec l'agent), teste et empaquette
    `HOTS_Console_Server.zip`, puis publie la release avec `SHA256SUMS.txt`.

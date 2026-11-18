@@ -10,6 +10,15 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 2.6.0). Creates tag v<version> on the selected branch and the release. Leave empty to only build."
+        required: false
+        default: ""
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version != '' && format('v{0}', inputs.version) || github.ref_name }}
+  PUBLISH: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.version != '') }}
 
 jobs:
   versions:
@@ -17,10 +26,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check that the tag matches the program version
-        if: startsWith(github.ref, 'refs/tags/')
+        if: env.PUBLISH == 'true'
         shell: bash
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${RELEASE_TAG#v}"
           app=$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' hosts_editor/version.py)
           iss=$(sed -n 's/^#define MyAppVersion "\(.*\)"/\1/p' setup.iss)
           echo "tag=$tag app=$app installer=$iss"
@@ -118,7 +127,7 @@ jobs:
           cp -r server/hots_server server/requirements.txt server/README.md LICENSE.txt "build/$name/"
           cp server/deploy/deploy.sh "build/$name/deploy.sh"
           chmod +x "build/$name/deploy.sh"
-          echo "${GITHUB_REF_NAME}" > "build/$name/VERSION"
+          echo "${RELEASE_TAG}" > "build/$name/VERSION"
           find "build/$name" -name '__pycache__' -prune -exec rm -rf {} +
           (cd build && zip -qr "$name.zip" "$name")
           ls -la build
@@ -132,7 +141,7 @@ jobs:
   release:
     needs: [windows-installer, console-server]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
     permissions:
       contents: write
     steps:
@@ -150,6 +159,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: HOTS Hosts ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           files: |
             assets/*.exe
             assets/*.zip
@@ -162,4 +174,4 @@ jobs:
             | 💻 Le PC à protéger (Windows 10/11) | **HOTS_Hosts_setup.exe** |
             | 🌐 Votre serveur de console (Ubuntu) | **HOTS_Console_Server.zip** — dézippez puis `sudo ./deploy.sh` |
 
-            Guide d'installation de la console : [docs/CONSOLE_WEB.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CONSOLE_WEB.md)
+            Guide d'installation de la console : [docs/CONSOLE_WEB.md](https://github.com/${{ github.repository }}/blob/${{ env.RELEASE_TAG }}/docs/CONSOLE_WEB.md)
