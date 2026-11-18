@@ -491,7 +491,15 @@ def run_user_helper() -> int:  # pragma: no cover - Windows only
     import ctypes
     from ctypes import wintypes
     user32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
-    out = k32.GetStdHandle(-11)
+    k32.GetStdHandle.restype = wintypes.HANDLE
+    k32.GetStdHandle.argtypes = [wintypes.DWORD]
+    k32.WriteFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+                              ctypes.c_void_p]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.c_void_p]
+    out = k32.GetStdHandle(wintypes.DWORD(-11 & 0xFFFFFFFF))
     if not out or out == wintypes.HANDLE(-1).value:
         return 1
 
