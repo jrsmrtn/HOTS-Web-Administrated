@@ -14,7 +14,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import __version__, alerts, db, security, settings
+from . import __version__, alerts, db, networks, security, settings
 
 log = logging.getLogger("hots_server")
 
@@ -59,6 +59,14 @@ ACTIONS = {
     "accounts.make_admin": True,
     "protections.repair": True,
     "agent.set_options": True,
+    "applocker.set": True,
+    "applocker.allow": True,
+    "applocker.remove": True,
+    "applocker.refresh": True,
+    "extensions.set": True,
+    "child_browsing.set": True,
+    "network_hardening.set": True,
+    "safesearch.set": True,
 }
 # Large read-only results are dropped from the history after a day.
 BULKY_RESULTS = ("get_state", "hosts.read", "apps.list_installed", "hosts.backups", "compliance.check")
@@ -725,6 +733,43 @@ async def account_settings(request: Request):
                          "smtp_configured": alerts.smtp_configured()})
 
 
+async def account_networks(request: Request):
+    user = current_user(request)
+    if request.method == "PUT":
+        require_owner(user)
+        try:
+            policy = networks.validate(await read_json(request))
+        except networks.PolicyError as e:
+            raise ApiError(400, str(e))
+        db.ex("UPDATE accounts SET network_policy_json = ? WHERE id = ?", (db.dumps(policy), user["account_id"]))
+        db.log_event("networks", f"Réseaux de confiance modifiés ({len(policy['trusted'])})", user["account_id"],
+                     user["id"], ip=client_ip(request))
+        for row in db.q("SELECT id FROM devices WHERE account_id = ?", (user["account_id"],)):
+            hub.wake_device(row["id"])  # PCs get the new policy within seconds
+        return JSONResponse(policy)
+    account = db.q1("SELECT network_policy_json FROM accounts WHERE id = ?", (user["account_id"],))
+    return JSONResponse(networks.get_policy(account))
+
+
+async def account_networks_seen(request: Request):
+    """Networks that blocked the filter on the account's PCs (captive portals, schools…), to trust them."""
+    user = current_user(request)
+    seen = {}
+    for row in db.q("SELECT id, name, state_json FROM devices WHERE account_id = ?", (user["account_id"],)):
+        state = db.loads(row["state_json"], {}) or {}
+        for net in ((state.get("networks") or {}).get("seen")) or []:
+            if not isinstance(net, dict) or not net.get("key"):
+                continue
+            entry = seen.setdefault(net["key"], {k: net.get(k) for k in ("key", "ssid", "gateway", "gateway_mac",
+                                                                         "domain", "kind", "last", "count")})
+            entry.setdefault("devices", [])
+            if row["name"] not in entry["devices"]:
+                entry["devices"].append(row["name"])
+            if (net.get("last") or 0) > (entry.get("last") or 0):
+                entry["last"] = net.get("last")
+    return JSONResponse({"seen": sorted(seen.values(), key=lambda n: n.get("last") or 0, reverse=True)[:50]})
+
+
 # --- server administration (superadmin) ----------------------------------------------------------------
 
 async def admin_accounts(request: Request):
@@ -899,9 +944,34 @@ def _store_info_and_state(device, data: dict, ip: str) -> None:
     if device["uninstalled_at"]:
         fields["uninstalled_at"] = None
         alerts.resolve(device["id"], "uninstalled")
+    if isinstance(state, dict):
+        _store_network_events(device, state)
     sets = ", ".join(f"{k} = ?" for k in fields)
     db.ex(f"UPDATE devices SET {sets} WHERE id = ?", (*fields.values(), device["id"]))
     alerts.record_boot(device, info.get("last_boot"))
+
+
+ALERTING_NET_EVENTS = ("captive_open", "captive_expired", "restrictive")
+
+
+def _store_network_events(device, state: dict) -> None:
+    events = ((state.get("networks") or {}).get("events")) or []
+    if not isinstance(events, list):
+        return
+    ids = [e.get("id") for e in events if isinstance(e, dict) and isinstance(e.get("id"), int)]
+    if not ids:
+        return
+    last = device["last_net_event"] or 0
+    if max(ids) < last:
+        last = 0  # the PC's network history was reset
+    for ev in events:
+        if not isinstance(ev, dict) or not isinstance(ev.get("id"), int) or ev["id"] <= last:
+            continue
+        message = str(ev.get("message") or "")[:300]
+        db.log_event("network", f"{device['name']} : {message}", device["account_id"], device_id=device["id"])
+        if ev.get("kind") in ALERTING_NET_EVENTS:
+            alerts.open_alert(device["account_id"], device["id"], "network", f"{device['name']} : {message}")
+    db.ex("UPDATE devices SET last_net_event = ? WHERE id = ?", (max(ids), device["id"]))
 
 
 def _store_results(device, results) -> None:
@@ -1008,20 +1078,25 @@ async def agent_poll(request: Request):
     lang = settings.DEFAULT_AGENT_LANG
     deadline = time.monotonic() + settings.POLL_HOLD_SECONDS
     commands = []
+    woken = False
     while True:
-        if db.q1("SELECT 1 FROM devices WHERE id = ?", (device["id"],)) is None:
-            raise ApiError(401, "PC retiré de la console.")
+        current = db.q1("SELECT token_hash FROM devices WHERE id = ?", (device["id"],))
+        if current is None or current["token_hash"] != device["token_hash"]:
+            # Removed, or re-enrolled meanwhile (new token): this stale agent must not take commands.
+            raise ApiError(401, "PC retiré de la console ou relié de nouveau.")
         commands = _take_pending(device["id"])
         remaining = deadline - time.monotonic()
-        if commands or remaining <= 0:
-            break
+        if commands or remaining <= 0 or woken:
+            break  # woken without command = new settings for the PC (e.g. network policy)
         ev = hub.device(device["id"])
         ev.clear()
-        await wait_event(ev, min(remaining, 5.0))
+        woken = await wait_event(ev, min(remaining, 5.0))
         if await request.is_disconnected():
             return Response(status_code=204)  # nothing was taken: commands stay pending
     db.ex("UPDATE devices SET last_seen = ? WHERE id = ?", (time.time(), device["id"]))
-    return JSONResponse({"commands": commands, "lang": lang, "server_time": time.time()})
+    account = db.q1("SELECT network_policy_json FROM accounts WHERE id = ?", (device["account_id"],))
+    return JSONResponse({"commands": commands, "lang": lang, "server_time": time.time(),
+                         "network_policy": networks.get_policy(account)})
 
 
 async def agent_results(request: Request):
@@ -1206,6 +1281,8 @@ routes = [
     Route("/api/alerts", list_alerts),
     Route(f"/api/alerts/{_int_path('alert_id')}/ack", ack_alert, methods=["POST"]),
     Route("/api/account/settings", account_settings, methods=["GET", "PATCH"]),
+    Route("/api/account/networks", account_networks, methods=["GET", "PUT"]),
+    Route("/api/account/networks/seen", account_networks_seen),
     Route("/api/admin/test-email", admin_test_email, methods=["POST"]),
     Route("/api/admin/accounts", admin_accounts),
     Route("/api/admin/accounts", admin_create_account, methods=["POST"]),

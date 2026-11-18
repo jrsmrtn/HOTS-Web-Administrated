@@ -21,6 +21,9 @@ from .secure_storage import PROGRAMDATA_DIR, atomic_write_json
 logger = logging.getLogger("HOTS.compliance")
 
 CHILDREN_FILE = os.path.join(PROGRAMDATA_DIR, "children.json")
+ACCOUNTS_SNAPSHOT = os.path.join(PROGRAMDATA_DIR, "accounts_snapshot.json")
+ACCESSIBILITY_EXES = ("sethc.exe", "utilman.exe", "osk.exe", "Magnify.exe", "Narrator.exe", "DisplaySwitch.exe",
+                      "AtBroker.exe")
 OPTIONS_FILE = os.path.join(PROGRAMDATA_DIR, "agent_options.json")
 REPORT_FILE = os.path.join(PROGRAMDATA_DIR, "compliance_report.json")
 
@@ -143,6 +146,15 @@ foreach ($n in 'Microsoft-Windows-Subsystem-Linux','VirtualMachinePlatform','Con
   $f[$n] = $(if ($x) { [int]$x.InstallState } else { $null })
 }
 $r.features = $f
+$acc = @()
+foreach ($n in 'sethc.exe','utilman.exe','osk.exe','Magnify.exe','Narrator.exe','DisplaySwitch.exe','AtBroker.exe') {
+  $p = Join-Path $env:windir "System32\$n"
+  if (Test-Path -LiteralPath $p) {
+    $sig = Get-AuthenticodeSignature -LiteralPath $p
+    $acc += [ordered]@{ name = $n; status = [string]$sig.Status; signer = [string]$sig.SignerCertificate.Subject }
+  }
+}
+$r.accessibility = $acc
 $r | ConvertTo-Json -Depth 4 -Compress
 """
 
@@ -265,6 +277,11 @@ def _ext_name(manifest: dict, ext_dir: str) -> str:
 
 def scan_proxy_extensions(profiles=None) -> list:
     """Browser extensions that request the "proxy" permission (VPN/proxy add-ons)."""
+    return [{k: v for k, v in e.items() if k != "proxy"} for e in scan_extensions(profiles) if e["proxy"]]
+
+
+def scan_extensions(profiles=None) -> list:
+    """Every installed browser extension (for the allow-list), with its "proxy" permission flag."""
     found = []
     for profile, home in profiles if profiles is not None else user_profiles():
         for browser, rel in CHROMIUM_DATA:
@@ -296,9 +313,11 @@ def scan_proxy_extensions(profiles=None) -> list:
                         continue
                     perms = [p for p in manifest.get("permissions") or [] if isinstance(p, str)]
                     optional = [p for p in manifest.get("optional_permissions") or [] if isinstance(p, str)]
-                    if "proxy" in perms or "proxy" in optional:
-                        found.append({"profile": profile, "browser": browser, "id": ext_id,
-                                      "name": _ext_name(manifest, ext_dir), "required": "proxy" in perms})
+                    if ext_id.startswith("_") or manifest.get("theme"):
+                        continue
+                    found.append({"profile": profile, "browser": browser, "id": ext_id, "family": "chromium",
+                                  "name": _ext_name(manifest, ext_dir), "required": "proxy" in perms,
+                                  "proxy": "proxy" in perms or "proxy" in optional})
         ff_root = os.path.join(home, "AppData", "Roaming", "Mozilla", "Firefox", "Profiles")
         try:
             ff_profiles = os.listdir(ff_root)
@@ -311,11 +330,13 @@ def scan_proxy_extensions(profiles=None) -> list:
             except Exception:
                 continue
             for addon in addons:
+                if addon.get("type") not in (None, "extension") or addon.get("location") in ("app-builtin", "app-system-defaults"):
+                    continue
                 perms = ((addon.get("userPermissions") or {}).get("permissions") or [])
-                if "proxy" in perms and addon.get("active", True):
-                    name = (addon.get("defaultLocale") or {}).get("name") or addon.get("id") or "?"
-                    found.append({"profile": profile, "browser": "Mozilla Firefox", "id": addon.get("id", ""),
-                                  "name": str(name)[:80], "required": True})
+                name = (addon.get("defaultLocale") or {}).get("name") or addon.get("id") or "?"
+                found.append({"profile": profile, "browser": "Mozilla Firefox", "id": addon.get("id", ""),
+                              "family": "firefox", "name": str(name)[:80], "required": "proxy" in perms,
+                              "proxy": "proxy" in perms and addon.get("active", True)})
     return found
 
 
@@ -372,6 +393,91 @@ def scan_user_proxies() -> list:
     return found
 
 
+IFEO_ROOT = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
+NRPT_KEYS = (r"SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig",
+             r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig")
+
+
+def scan_ifeo_debuggers() -> list:
+    """IFEO "Debugger" values not created by HOTS (they hijack the launch of a program)."""
+    found = []
+    try:
+        import winreg
+        from .core_appblock import BLOCK_DEBUGGER_CMD
+    except ImportError:
+        return found
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, IFEO_ROOT)
+    except OSError:
+        return found
+    with root:
+        i = 0
+        while True:
+            try:
+                name = winreg.EnumKey(root, i)
+            except OSError:
+                break
+            i += 1
+            try:
+                with winreg.OpenKey(root, name) as k:
+                    value = winreg.QueryValueEx(k, "Debugger")[0]
+            except OSError:
+                continue
+            if str(value).strip().strip('"').lower() != BLOCK_DEBUGGER_CMD.lower():
+                found.append({"exe": name, "debugger": str(value)[:200]})
+    return found
+
+
+def scan_nrpt() -> int:
+    """Name Resolution Policy Table rules: they can send some domains to another DNS server."""
+    count = 0
+    try:
+        import winreg
+    except ImportError:
+        return 0
+    for path in NRPT_KEYS:
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as k:
+                count += winreg.QueryInfoKey(k)[0]
+        except OSError:
+            continue
+    return count
+
+
+def account_changes(win: dict, now: float = None) -> list:
+    """New local accounts / new administrators since the previous check (kept 7 days)."""
+    now = now or time.time()
+    users = {u.get("sid"): u.get("name") for u in win.get("users") or [] if u.get("sid")}
+    admins = set(win.get("admins") or [])
+    if not users:
+        return _read_json(ACCOUNTS_SNAPSHOT, {}).get("changes") or []
+    snap = _read_json(ACCOUNTS_SNAPSHOT, {})
+    changes = [c for c in snap.get("changes") or [] if now - c.get("at", 0) < 7 * 86400]
+    expected = set(snap.get("expected_admins") or [])
+    if snap.get("users"):
+        for sid, name in users.items():
+            if sid not in snap["users"]:
+                changes.append({"kind": "new_user", "sid": sid, "name": name, "at": now})
+        for sid in admins:
+            if sid not in (snap.get("admins") or []) and sid not in expected and sid in users:
+                changes.append({"kind": "new_admin", "sid": sid, "name": users.get(sid), "at": now})
+    try:
+        atomic_write_json(ACCOUNTS_SNAPSHOT, {"users": sorted(users), "admins": sorted(admins), "changes": changes,
+                                              "expected_admins": []})
+    except Exception:
+        logger.exception("cannot save the accounts snapshot")
+    return changes
+
+
+def _expect_admin(sid: str) -> None:
+    snap = _read_json(ACCOUNTS_SNAPSHOT, {})
+    snap["expected_admins"] = sorted(set(snap.get("expected_admins") or []) | {sid})
+    try:
+        atomic_write_json(ACCOUNTS_SNAPSHOT, snap)
+    except Exception:
+        pass
+
+
 def observed_protections() -> dict:
     """Wanted (saved state) vs real state of each protection."""
     out = {}
@@ -418,6 +524,13 @@ def observed_protections() -> dict:
                 "rules": st["rules"], "adapters": st["adapters"],
                 "drift": bool(st["active"] and not (st["all_ok"] and st["rules"]))}
 
+    def applocker():
+        from .core_applocker import AppLockerManager
+        cur = AppLockerManager.status()
+        return {"wanted": cur["mode"], "drift": not AppLockerManager.is_effective(),
+                "would_block": len([e for e in cur.get("events") or [] if not e.get("blocked")]),
+                "blocked": sum(e.get("blocked", 0) for e in cur.get("events") or [])}
+
     def privacy():
         from .core_antispy import AntiSpyManager, ITEMS
         user_ids = {it["id"] for it in ITEMS if it["kind"] == "hkcu_reg"}
@@ -425,8 +538,19 @@ def observed_protections() -> dict:
         regressed = [i for i in regressed if i not in user_ids]
         return {"drift": bool(regressed), "regressed": regressed}
 
+    def hardening():
+        from .core_hardening import NetworkHardeningManager
+        st = NetworkHardeningManager.status()
+        return dict(st, drift=bool(st["drift"]))
+
+    def safesearch():
+        from .core_safesearch import SafeSearchManager
+        cur = SafeSearchManager.current()
+        return {"google": cur["google"], "youtube": cur["youtube"], "bing": cur["bing"], "drift": False}
+
     for name, fn in (("hosts_lock", hosts_lock), ("netblock", netblock), ("apps", apps), ("doh", doh),
-                     ("browsers", browsers), ("dns", dns), ("privacy", privacy)):
+                     ("browsers", browsers), ("dns", dns), ("applocker", applocker), ("privacy", privacy),
+                     ("hardening", hardening), ("safesearch", safesearch)):
         safe(name, fn)
     return out
 
@@ -540,7 +664,8 @@ def evaluate(data: dict) -> list:
     obs = data.get("observed") or {}
     labels = {"hosts_lock": "Verrou du fichier hosts", "netblock": "Coupure d'Internet", "apps": "Blocage d'applications",
               "doh": "Blocage du DNS sécurisé des navigateurs", "browsers": "Navigateurs verrouillés",
-              "dns": "DNS verrouillé", "privacy": "Réglages de confidentialité"}
+              "dns": "DNS verrouillé", "privacy": "Réglages de confidentialité",
+              "applocker": "Mode anti-portable", "hardening": "VPN et proxy de Windows", "safesearch": "SafeSearch"}
     drifted = [labels[k] for k, v in obs.items() if isinstance(v, dict) and v.get("drift")]
     if obs:
         checks.append(_check("protections.real", "blocages", "high", "fail" if drifted else "ok",
@@ -574,6 +699,72 @@ def evaluate(data: dict) -> list:
                              "Bloque les extensions VPN/proxy, force SafeSearch et YouTube restreint." if off else "",
                              fix={"action": "browser_policies.set", "params": {"level": "standard", "safesites": False},
                                   "label": "Verrouiller"} if off else None))
+
+    al = obs.get("applocker") if isinstance(obs.get("applocker"), dict) else {}
+    if al and "wanted" in al and children:
+        mode = al.get("wanted")
+        if mode == "off":
+            checks.append(_check("bypass.portable", "navigateurs", "high", "warn",
+                                 "Programmes portables autorisés pour l'enfant",
+                                 "Un navigateur ou un VPN copié dans Téléchargements ou sur une clé USB peut être lancé. "
+                                 "Le mode anti-portable l'empêche pour le seul compte enfant (commencez par l'observation).",
+                                 fix={"action": "applocker.set", "params": {"mode": "audit"}, "label": "Observer 7 jours"}))
+        elif mode == "audit":
+            n = al.get("would_block") or 0
+            checks.append(_check("bypass.portable", "navigateurs", "medium", "warn",
+                                 f"Mode anti-portable en observation : {n} programme(s) seraient bloqués",
+                                 "Approuvez les programmes légitimes (onglet Applications), puis activez le blocage.",
+                                 fix={"action": "applocker.set", "params": {"mode": "enforce"}, "label": "Activer le blocage"}))
+        else:
+            checks.append(_check("bypass.portable", "navigateurs", "high", "ok",
+                                 "Mode anti-portable actif : seuls les programmes installés peuvent être lancés par l'enfant"))
+
+    hard = obs.get("hardening") if isinstance(obs.get("hardening"), dict) else {}
+    if hard and "hide_settings" in hard and not hard.get("hide_settings"):
+        checks.append(_check("bypass.native_settings", "réseau", "low", "warn",
+                             "Les réglages VPN et proxy de Windows sont accessibles",
+                             "Un compte standard peut y créer un VPN ou un proxy pour contourner les filtres.",
+                             fix={"action": "network_hardening.set",
+                                  "params": {"hide_settings": True, "machine_proxy": True, "block_protocols": False},
+                                  "label": "Masquer"}))
+    ss = obs.get("safesearch") if isinstance(obs.get("safesearch"), dict) else {}
+    if ss and "google" in ss and not ss.get("google"):
+        checks.append(_check("bypass.safesearch", "navigateurs", "low", "warn",
+                             "SafeSearch non imposé à toutes les applications",
+                             "Le verrouillage des navigateurs couvre Chrome, Edge, Brave et Firefox ; le fichier hosts "
+                             "l'impose à tous les navigateurs et applications.",
+                             fix={"action": "safesearch.set", "params": {"google": True, "youtube": "moderate", "bing": True},
+                                  "label": "Imposer SafeSearch"}))
+
+    # Tampering ------------------------------------------------------------------------------------------------
+    for acc in win.get("accessibility") or []:
+        ok = acc.get("status") == "Valid" and "O=Microsoft Corporation" in (acc.get("signer") or "")
+        if not ok:
+            checks.append(_check(f"tamper.accessibility.{acc.get('name')}", "altérations", "critical", "fail",
+                                 f"Outil d'accessibilité remplacé : {acc.get('name')}",
+                                 "Classique pour ouvrir une invite de commandes administrateur depuis l'écran de connexion. "
+                                 "Restaurez le fichier (sfc /scannow) et cherchez qui l'a modifié."))
+    foreign = data.get("ifeo_foreign") or []
+    if foreign:
+        critical = [f for f in foreign if f["exe"].lower() in [a.lower() for a in ACCESSIBILITY_EXES]]
+        checks.append(_check("tamper.ifeo", "altérations", "critical" if critical else "high", "fail" if critical else "warn",
+                             f"{len(foreign)} programme(s) détourné(s) au lancement (IFEO)",
+                             "Une valeur « Debugger » remplace le programme par un autre. Certaines sont légitimes "
+                             "(ex. Process Explorer à la place du Gestionnaire des tâches) : vérifiez la liste.",
+                             items=[{"name": f["exe"], "value": f["debugger"]} for f in foreign[:30]]))
+    for change in data.get("account_changes") or []:
+        if change["kind"] == "new_admin":
+            checks.append(_check(f"tamper.new_admin.{change['sid']}", "altérations", "high", "fail",
+                                 f"Nouveau compte administrateur : {change.get('name')}",
+                                 "Ajouté hors de la console. Si ce n'est pas vous, retirez-lui les droits."))
+        elif change["kind"] == "new_user":
+            checks.append(_check(f"tamper.new_user.{change['sid']}", "altérations", "medium", "warn",
+                                 f"Nouveau compte Windows : {change.get('name')}",
+                                 "S'il est utilisé par un enfant, cochez-le comme « compte enfant »."))
+    if data.get("nrpt"):
+        checks.append(_check("tamper.nrpt", "altérations", "high", "warn",
+                             f"{data['nrpt']} règle(s) DNS par domaine (NRPT)",
+                             "Elles peuvent envoyer certains domaines vers un autre serveur DNS, hors du filtre."))
 
     # Bypass tools ---------------------------------------------------------------------------------------------
     unmanaged = data.get("unmanaged") or []
@@ -625,8 +816,9 @@ def build_report(with_observed: bool = True) -> dict:
     started = time.time()
     data = {"children": child_sids()}
     steps = (("windows", collect_windows), ("registry", collect_registry),
-             ("unmanaged", scan_unmanaged), ("proxy_extensions", scan_proxy_extensions),
-             ("native_vpn", scan_native_vpn), ("user_proxies", scan_user_proxies))
+             ("unmanaged", scan_unmanaged), ("extensions", scan_extensions),
+             ("native_vpn", scan_native_vpn), ("user_proxies", scan_user_proxies),
+             ("ifeo_foreign", scan_ifeo_debuggers), ("nrpt", scan_nrpt))
     if with_observed:
         steps += (("observed", observed_protections),)
     errors = {}
@@ -636,6 +828,11 @@ def build_report(with_observed: bool = True) -> dict:
         except Exception as e:
             logger.exception("compliance step %s failed", key)
             errors[key] = str(e)
+    data["proxy_extensions"] = [e for e in data.get("extensions") or [] if e.get("proxy")]
+    try:
+        data["account_changes"] = account_changes(data.get("windows") or {})
+    except Exception:
+        logger.exception("account changes check failed")
     checks = evaluate(data)
     value, todo = score(checks)
     win = data.get("windows") or {}
@@ -647,6 +844,8 @@ def build_report(with_observed: bool = True) -> dict:
                  "source": u.get("source") or "", "last_logon": u.get("last_logon")}
                 for u in win.get("users") or []]
     report = {"score": value, "todo": todo, "checks": checks, "accounts": accounts, "errors": errors,
+              "extensions": [{k: e.get(k) for k in ("browser", "family", "id", "name", "proxy", "profile")}
+                             for e in data.get("extensions") or []][:300],
               "checked_at": time.time(), "duration_s": round(time.time() - started, 1),
               "dns": (data.get("observed") or {}).get("dns")}
     try:
@@ -685,7 +884,9 @@ def make_standard(sid: str) -> None:
 
 
 def make_admin(sid: str) -> None:
-    _set_admin(_validate_sid(sid), True)
+    sid = _validate_sid(sid)
+    _expect_admin(sid)  # done from the console: not reported as tampering
+    _set_admin(sid, True)
 
 
 def _set_admin(sid: str, admin: bool) -> None:
@@ -753,6 +954,14 @@ def repair_protections() -> list:
         from .core_dnslock import DnsLockManager
         return bool(DnsLockManager.reapply())
 
+    def applocker():
+        from .core_applocker import AppLockerManager
+        return AppLockerManager.repair()
+
+    def hardening():
+        from .core_hardening import NetworkHardeningManager
+        return NetworkHardeningManager.repair()
+
     def privacy():
         from .core_antispy import AntiSpyManager, ITEMS
         user_ids = {it["id"] for it in ITEMS if it["kind"] == "hkcu_reg"}
@@ -766,6 +975,7 @@ def repair_protections() -> list:
     for label, fn in (("verrou du fichier hosts", hosts_lock), ("coupure d'Internet", netblock),
                       ("blocage d'applications", apps), ("DNS sécurisé des navigateurs", doh),
                       ("navigateurs verrouillés", browsers), ("DNS verrouillé", dns),
+                      ("mode anti-portable", applocker), ("VPN et proxy de Windows", hardening),
                       ("confidentialité", privacy)):
         attempt(label, fn)
     if repaired:

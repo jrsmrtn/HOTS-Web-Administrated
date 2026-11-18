@@ -227,6 +227,11 @@ def _parental_set(p):
         if not os.path.exists(path):
             raise ActionError(f"Liste de blocage introuvable sur le PC : {file}")
     _toggle_block(cat, path, enabled)
+    if file == "youtube.txt":
+        try:
+            refresh_safesearch()  # YouTube blocked: never leave it "restricted" instead
+        except ActionError:
+            pass
     return {"category": file, "enabled": enabled}
 
 
@@ -371,6 +376,98 @@ def _accounts_make_admin(p):
 def _protections_repair(p):
     from ..compliance import repair_protections
     return {"repaired": repair_protections()}
+
+
+@action("applocker.set")
+def _applocker_set(p):
+    from ..core_applocker import AppLockerManager, MODES
+    mode = _str(p, "mode", 16)
+    if mode not in MODES:
+        raise ActionError(f"Mode inconnu : {mode}")
+    if not AppLockerManager.set_mode(mode):
+        raise ActionError(AppLockerManager.last_error or "La stratégie n'a pas pu être appliquée.")
+    return AppLockerManager.status()
+
+
+@action("applocker.allow")
+def _applocker_allow(p):
+    from ..core_applocker import AppLockerManager
+    try:
+        ok = AppLockerManager.add_exception(p.get("exception"))
+    except ValueError as e:
+        raise ActionError(f"Exception invalide : {e}") from None
+    if not ok:
+        raise ActionError(AppLockerManager.last_error or "L'exception n'a pas pu être ajoutée.")
+    return AppLockerManager.status()
+
+
+@action("applocker.remove")
+def _applocker_remove(p):
+    from ..core_applocker import AppLockerManager
+    if not AppLockerManager.remove_exception(_str(p, "id", 16)):
+        raise ActionError(AppLockerManager.last_error or "L'exception n'a pas pu être retirée.")
+    return AppLockerManager.status()
+
+
+@action("applocker.refresh")
+def _applocker_refresh(p):
+    from ..core_applocker import AppLockerManager
+    AppLockerManager.refresh_events()
+    return AppLockerManager.status()
+
+
+@action("extensions.set")
+def _extensions_set(p):
+    from ..core_browser_policy import BrowserPolicyManager, clean_extensions
+    mode = _str(p, "mode", 16)
+    if mode not in ("proxy", "allowlist"):
+        raise ActionError(f"Mode inconnu : {mode}")
+    ext = clean_extensions({"mode": mode, "chromium": p.get("chromium"), "firefox": p.get("firefox")})
+    if not BrowserPolicyManager.set_extensions(ext):
+        raise ActionError(BrowserPolicyManager.last_error or "Les stratégies n'ont pas pu être appliquées.")
+    return ext
+
+
+@action("child_browsing.set")
+def _child_browsing_set(p):
+    from ..core_browser_policy import BrowserPolicyManager
+    enabled = _bool(p, "private_off")
+    BrowserPolicyManager.set_child_private_off(enabled)
+    return {"private_off": enabled,
+            "note": "Appliqué aux comptes enfants dès qu'ils sont connectés (sinon à leur prochaine connexion)."}
+
+
+@action("network_hardening.set")
+def _network_hardening_set(p):
+    from ..core_hardening import NetworkHardeningManager
+    opts = {k: _bool(p, k) for k in ("hide_settings", "machine_proxy", "block_protocols")}
+    if not NetworkHardeningManager.apply(**opts):
+        raise ActionError(NetworkHardeningManager.last_error or "Les réglages n'ont pas pu être appliqués.")
+    return opts
+
+
+@action("safesearch.set")
+def _safesearch_set(p):
+    from ..core_safesearch import SafeSearchManager, YOUTUBE_LEVELS
+    youtube = p.get("youtube", "off")
+    if youtube not in YOUTUBE_LEVELS:
+        raise ActionError("Niveau YouTube inconnu.")
+    opts = {"google": p.get("google") is True, "youtube": youtube, "bing": p.get("bing") is True}
+    with _hosts_writable():
+        ok = _wrap_hosts_errors(SafeSearchManager.apply, opts)
+    if not ok:
+        raise ActionError(SafeSearchManager.last_error or "L'écriture du fichier hosts a échoué.")
+    return SafeSearchManager.current()
+
+
+def refresh_safesearch() -> bool:
+    """Periodic: re-resolve the SafeSearch IPs and follow the YouTube category (hosts unlocked briefly)."""
+    from ..core_safesearch import SafeSearchManager
+    cur = SafeSearchManager.current()
+    if not (cur["google"] or cur["bing"] or cur["youtube"] != "off"):
+        return False
+    with _hosts_writable():
+        return bool(_wrap_hosts_errors(SafeSearchManager.refresh))
 
 
 @action("agent.set_options")
@@ -889,6 +986,26 @@ def _state_browser_policies():
     return BrowserPolicyManager.status()
 
 
+def _state_hardening():
+    from ..core_hardening import NetworkHardeningManager
+    return NetworkHardeningManager.status()
+
+
+def _state_safesearch():
+    from ..core_safesearch import SafeSearchManager
+    return SafeSearchManager.current()
+
+
+def _state_applocker():
+    from ..core_applocker import AppLockerManager
+    return AppLockerManager.status()
+
+
+def _state_networks():
+    from ..core_networks import status
+    return status()
+
+
 def _state_compliance():
     from ..compliance import cached_report, options
     report = cached_report()
@@ -958,6 +1075,10 @@ _SECTIONS = (
     ("parental", _state_parental),
     ("cf_family", _state_cf),
     ("browser_policies", _state_browser_policies),
+    ("networks", _state_networks),
+    ("applocker", _state_applocker),
+    ("hardening", _state_hardening),
+    ("safesearch", _state_safesearch),
     ("compliance", _state_compliance),
     ("protections", _state_protections),
     ("apps", _state_apps),

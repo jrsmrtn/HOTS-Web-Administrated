@@ -78,6 +78,8 @@ const ICONS = {
   shieldcheck: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/>',
   bell: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
   calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
+  wifi: '<path d="M5 12.55a11 11 0 0 1 14.08 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/>',
+  usb: '<path d="M10 7V3h4v4M8 7h8v6a4 4 0 0 1-8 0V7zM12 17v4"/>',
 };
 
 function icon(name) {
@@ -877,6 +879,7 @@ function tabParental(ctx, box) {
         }, { label: 'Filtre DNS familial' })),
       cf.active && cf.complete === false ? banner('warn', 'alert', h('p', null,
         'Une carte réseau (IPv6, partage de connexion du téléphone…) n\'utilise pas le filtre. Activez « DNS verrouillé » dans l\'onglet Protections.')) : null),
+    safeSearchCard(ctx),
     card('Mes sites bloqués', 'edit', 'Un domaine par ligne (les adresses complètes sont acceptées : https://exemple.com/page devient exemple.com).',
       settingRow(custom.active ? 'Blocage actif' : 'Blocage inactif', `${(custom.domains || []).length} domaine(s) dans la liste`,
         switchEl(!!custom.active, async (on) => {
@@ -890,6 +893,21 @@ function tabParental(ctx, box) {
             await ctx.exec('custom_domains.set', { domains, apply: true }, `Mettre à jour mes sites bloqués (${domains.length})`);
           },
         })))));
+}
+
+function safeSearchCard(ctx) {
+  const cur = ctx.device.state.safesearch || { google: false, youtube: 'off', bing: false };
+  const youtube = h('select', null, [['off', 'Non imposé'], ['moderate', 'Mode restreint modéré'], ['strict', 'Mode restreint strict']]
+    .map(([v, l]) => h('option', { value: v, selected: v === cur.youtube }, l)));
+  const set = async (changes, label) => {
+    const r = await ctx.exec('safesearch.set', { google: cur.google, youtube: cur.youtube, bing: cur.bing, ...changes }, label);
+    return r && r.status === 'done';
+  };
+  youtube.addEventListener('change', () => set({ youtube: youtube.value }, `YouTube : ${youtube.selectedOptions[0].textContent}`).catch(showError));
+  return card('Recherche et vidéos filtrées partout', 'search', 'SafeSearch de Google et Bing et mode restreint de YouTube imposés à tous les navigateurs et applications du PC, via le fichier hosts.',
+    settingRow('Google SafeSearch', null, switchEl(!!cur.google, (on) => set({ google: on }, `${on ? 'Imposer' : 'Ne plus imposer'} Google SafeSearch`), { label: 'Google SafeSearch' })),
+    settingRow('Bing SafeSearch strict', null, switchEl(!!cur.bing, (on) => set({ bing: on }, `${on ? 'Imposer' : 'Ne plus imposer'} Bing SafeSearch`), { label: 'Bing SafeSearch' })),
+    settingRow('YouTube', 'Si la catégorie YouTube est bloquée, YouTube reste bloqué.', youtube));
 }
 
 /* ---------- Onglet : protections ---------- */
@@ -923,7 +941,93 @@ function tabProtections(ctx, box) {
         sw('netblock', 'netblock.set', 'coupure d\'Internet', 'Couper l\'accès à Internet sur ce PC ? Vous pourrez le rétablir depuis cette console.')),
       pr.netblock ? banner('danger', 'wifioff', h('p', null, 'Internet est actuellement coupé sur ce PC.')) : null),
     card('DNS sécurisé des navigateurs (DoH)', 'browser', 'Les navigateurs peuvent contourner le fichier hosts grâce au « DNS sécurisé ». Bloquez-le pour que les filtres s\'appliquent.', ...doh)),
-    browserPolicyCard(ctx), dnsLockCard(ctx)));
+    browserPolicyCard(ctx), dnsLockCard(ctx), networkStatusCard(ctx), hardeningCard(ctx)));
+}
+
+/* ---------- Réseaux de confiance & portails captifs ---------- */
+
+const MATCH_LABELS = { 'ssid+gateway': 'Wi-Fi + passerelle (recommandé)', ssid: 'Nom du Wi-Fi seul (moins sûr)', gateway: 'Passerelle seule (réseau filaire)' };
+const PROXY_LABELS = { none: 'Aucun proxy', auto: 'Détection automatique (WPAD)', pac: 'Fichier de configuration (PAC)', fixed: 'Proxy fixe' };
+
+/** Un réseau rencontré est-il déjà couvert par un réseau de confiance ? */
+function isTrusted(seen, trusted) {
+  return (trusted || []).some((t) => (t.match === 'ssid' && t.ssid && t.ssid === seen.ssid)
+    || (t.match === 'gateway' && t.gateway_mac && t.gateway_mac === seen.gateway_mac)
+    || (t.match === 'ssid+gateway' && t.ssid === seen.ssid && t.gateway_mac === seen.gateway_mac));
+}
+
+function proxyText(p) {
+  if (!p || p.mode === 'none') return 'sans proxy';
+  return p.mode === 'fixed' ? `proxy ${p.server}` : p.mode === 'pac' ? `PAC ${p.pac_url}` : 'proxy automatique';
+}
+
+/** Ajoute ou modifie un réseau de confiance du compte (appliqué à tous ses PC). */
+async function trustedNetworkDialog(prefill, onSaved) {
+  const policy = await api('GET', '/api/account/networks');
+  const net = prefill || {};
+  return formDialog({
+    title: net.id ? 'Modifier le réseau de confiance' : 'Nouveau réseau de confiance', iconName: 'wifi',
+    intro: h('p', { class: 'muted small' }, 'Sur ce réseau (établissement scolaire, travail), les PC du compte utilisent son DNS et son proxy : c\'est lui qui filtre. Ailleurs, le filtre familial s\'applique.'),
+    fields: [
+      { name: 'name', label: 'Nom', value: net.name || net.ssid || '', placeholder: 'Collège Jean Moulin' },
+      { name: 'ssid', label: 'Nom du Wi-Fi (SSID)', value: net.ssid || '' },
+      { name: 'gateway_mac', label: 'Adresse MAC de la passerelle', value: net.gateway_mac || '', placeholder: '00:1a:2b:3c:4d:5e', help: 'Relevée automatiquement par les PC (« Réseaux rencontrés »). Elle empêche qu\'un téléphone nommé comme le Wi-Fi de l\'établissement soit reconnu.' },
+      { name: 'match', label: 'Reconnaissance', type: 'select', value: net.match || 'ssid+gateway', options: Object.entries(MATCH_LABELS) },
+      { name: 'proxy_mode', label: 'Proxy imposé par ce réseau', type: 'select', value: (net.proxy && net.proxy.mode) || 'none', options: Object.entries(PROXY_LABELS) },
+      { name: 'proxy_server', label: 'Proxy fixe (nom:port)', value: (net.proxy && net.proxy.server) || '', placeholder: 'proxy.college.lan:3128' },
+      { name: 'pac_url', label: 'Adresse du fichier PAC', value: (net.proxy && net.proxy.pac_url) || '', placeholder: 'http://wpad.college.lan/wpad.dat' },
+    ],
+    submit: async (v) => {
+      const proxy = { mode: v.proxy_mode };
+      if (v.proxy_mode === 'fixed') proxy.server = v.proxy_server.trim();
+      if (v.proxy_mode === 'pac') proxy.pac_url = v.pac_url.trim();
+      const entry = { id: net.id, name: v.name.trim(), ssid: v.ssid, gateway_mac: v.gateway_mac.trim(), match: v.match, proxy, note: net.note || '' };
+      const trusted = (policy.trusted || []).filter((n) => !net.id || n.id !== net.id).concat([entry]);
+      await api('PUT', '/api/account/networks', { ...policy, trusted });
+      toast('Réseau de confiance enregistré : les PC le reçoivent dans les secondes qui suivent.', 'ok');
+      setTimeout(() => onSaved && onSaved(), 0);
+    },
+  });
+}
+
+function networkStatusCard(ctx) {
+  const st = ctx.device.state.networks || {};
+  const relax = st.relax || {};
+  const events = (st.events || []).slice().reverse().slice(0, 8);
+  const seen = (st.seen || []).filter((n) => !isTrusted(n, (st.policy || {}).trusted));
+  const relaxRows = Object.entries(relax).map(([iface, r]) => settingRow(`${iface} : ${r.network}`,
+    r.reason === 'trusted' ? 'Réseau de confiance : DNS et proxy de l\'établissement utilisés.'
+      : `Portail de connexion : filtre DNS suspendu jusqu'à ${new Date(r.until * 1000).toLocaleTimeString('fr-FR')}.`,
+    badge(r.reason === 'trusted' ? 'Confiance' : 'Portail captif', r.reason === 'trusted' ? 'ok' : 'warn', r.reason === 'trusted' ? 'check' : 'clock')));
+  return card('Réseaux : établissements et Wi-Fi publics', 'wifi',
+    'Sur un réseau qui impose son propre DNS (portail de connexion d\'un hôtel ou d\'une gare, réseau d\'établissement), le filtre est suspendu 10 minutes le temps de se connecter, puis revient. Les réseaux de confiance (Mon compte → Réseaux de confiance) utilisent durablement leur propre filtrage.',
+    relaxRows.length ? relaxRows : h('p', { class: 'muted small' }, 'Filtre appliqué normalement sur toutes les cartes.'),
+    seen.length ? h('div', null, h('h4', { style: { margin: '14px 0 6px' } }, 'Réseaux rencontrés qui bloquent le filtre'),
+      seen.slice(0, 6).map((n) => settingRow(n.ssid ? `Wi-Fi « ${n.ssid} »` : `Réseau filaire (${n.gateway})`,
+        `${n.kind === 'captive' ? 'Portail de connexion' : 'Impose son DNS'} · passerelle ${n.gateway_mac || n.gateway || '?'}${n.domain ? ` · ${n.domain}` : ''} · ${fmtAgo(n.last)}`,
+        btn('Faire confiance', { small: true, icon: 'check', onclick: () => trustedNetworkDialog({ ssid: n.ssid, gateway_mac: n.gateway_mac, match: n.ssid && n.gateway_mac ? 'ssid+gateway' : n.ssid ? 'ssid' : 'gateway' }, () => ctx.reload()) })))) : null,
+    events.length ? h('details', null, h('summary', null, `Journal réseau (${events.length})`),
+      h('ul', { class: 'items' }, events.map((e) => h('li', null, h('span', { class: 'muted small' }, `${fmtAgo(e.at)} — `), e.message)))) : null);
+}
+
+function hardeningCard(ctx) {
+  const hd = ctx.device.state.hardening || {};
+  const set = async (changes, label) => {
+    const params = { hide_settings: !!hd.hide_settings, machine_proxy: !!hd.machine_proxy, block_protocols: !!hd.block_protocols, ...changes };
+    const r = await ctx.exec('network_hardening.set', params, label);
+    return r && r.status === 'done';
+  };
+  return card('VPN et proxy intégrés à Windows', 'shieldoff', 'Sans rien installer, un compte standard peut créer un VPN ou un proxy dans les Paramètres de Windows. Ces réglages s\'appliquent à tous les comptes du PC.',
+    settingRow('Masquer les pages VPN et Proxy des Paramètres', null,
+      switchEl(!!hd.hide_settings, (on) => set({ hide_settings: on }, `${on ? 'Masquer' : 'Afficher'} les pages VPN et proxy`), { label: 'Masquer les pages VPN et Proxy' })),
+    settingRow('Proxy réglé pour tout le PC', 'Un compte standard ne peut plus définir son propre proxy.',
+      switchEl(!!hd.machine_proxy, (on) => set({ machine_proxy: on }, `${on ? 'Activer' : 'Désactiver'} le proxy par machine`), { label: 'Proxy par machine' })),
+    settingRow('Bloquer les protocoles VPN (IKEv2, L2TP, PPTP)', 'Coupe aussi le VPN d\'un parent s\'il utilise ces protocoles. Les VPN sur le port 443 (SSTP, OpenVPN) ne sont pas concernés.',
+      switchEl(!!hd.block_protocols, async (on) => {
+        if (on && !(await confirmDialog('Les VPN de type IKEv2, L2TP et PPTP ne fonctionneront plus sur ce PC, y compris pour les parents. Continuer ?', { ok: 'Bloquer' }))) return false;
+        return set({ block_protocols: on }, `${on ? 'Bloquer' : 'Autoriser'} les protocoles VPN`);
+      }, { label: 'Bloquer les protocoles VPN' })),
+    hd.drift && hd.drift.length ? banner('danger', 'alert', h('p', null, 'Des réglages ont été modifiés sur le PC : ils seront rétablis par l\'auto-réparation.')) : null);
 }
 
 const BROWSER_LEVELS = [
@@ -948,7 +1052,37 @@ function browserPolicyCard(ctx) {
     h('label', { class: 'check-label small' }, safesites, h('span', null, 'Option : filtre « sites adultes » de Chrome (SafeSites). Il envoie les adresses visitées à Google pour classement ; prise en compte au prochain choix de niveau.')),
     bpState.level !== 'off' ? h('div', { class: 'badges', style: { 'margin-top': '10px' } }, (bpState.browsers || []).map((b) =>
       badge(b.ok ? b.name : `${b.name} : modifié`, b.ok ? 'ok' : 'danger', b.ok ? 'check' : 'alert'))) : null,
-    bpState.drift ? banner('danger', 'alert', h('p', null, 'Des réglages ont été modifiés sur le PC. Ils seront rétablis automatiquement (auto-réparation) ou depuis l\'onglet Sécurité.')) : null);
+    bpState.drift ? banner('danger', 'alert', h('p', null, 'Des réglages ont été modifiés sur le PC. Ils seront rétablis automatiquement (auto-réparation) ou depuis l\'onglet Sécurité.')) : null,
+    h('div', { class: 'setting' }, h('div', { class: 'text' },
+      h('div', { class: 'title' }, 'Navigation privée désactivée pour les comptes enfants seulement'),
+      h('div', { class: 'desc' }, 'Incognito, InPrivate et fenêtres privées de Firefox : historique toujours visible, sans toucher aux comptes des parents.')),
+      switchEl(!!bpState.child_private_off, async (on) => {
+        const r = await ctx.exec('child_browsing.set', { private_off: on }, `${on ? 'Désactiver' : 'Autoriser'} la navigation privée des enfants`);
+        return r && r.status === 'done';
+      }, { label: 'Navigation privée des enfants' })),
+    extensionsSection(ctx, bpState));
+}
+
+function extensionsSection(ctx, bpState) {
+  const ext = bpState.extensions || { mode: 'proxy', chromium: [], firefox: [] };
+  const report = ((ctx.device.state.compliance || {}).report) || {};
+  const inventory = (report.extensions || []).filter((e, i, all) => all.findIndex((x) => x.id === e.id) === i);
+  const allowed = new Set([...(ext.chromium || []), ...(ext.firefox || [])]);
+  const boxes = inventory.map((e) => ({ e, input: h('input', { type: 'checkbox', checked: allowed.has(e.id) || (ext.mode !== 'allowlist' && !e.proxy) }) }));
+  const save = async (mode) => {
+    const chosen = boxes.filter((b) => b.input.checked).map((b) => b.e);
+    await ctx.exec('extensions.set', {
+      mode, chromium: chosen.filter((e) => e.family === 'chromium').map((e) => e.id), firefox: chosen.filter((e) => e.family === 'firefox').map((e) => e.id),
+    }, mode === 'allowlist' ? `Extensions : liste blanche (${chosen.length})` : 'Extensions : seules les extensions VPN/proxy sont bloquées');
+  };
+  return h('details', { class: 'ext-section' }, h('summary', null, `Extensions : ${ext.mode === 'allowlist' ? `liste blanche (${allowed.size} autorisée(s))` : 'extensions VPN/proxy bloquées'}`),
+    h('p', { class: 'small muted' }, 'Liste blanche : seules les extensions cochées restent installées, les autres sont désactivées et ne peuvent plus être ajoutées. Liste établie lors du dernier bilan de sécurité.'),
+    boxes.length ? h('div', { class: 'ext-list' }, boxes.map(({ e, input }) => h('label', { class: 'check-label small' }, input,
+      h('span', null, h('strong', null, e.name), ` — ${e.browser}`, e.proxy ? badge('VPN/proxy', 'danger') : null)))) : h('p', { class: 'small muted' }, 'Aucune extension relevée : lancez un bilan dans l\'onglet Sécurité.'),
+    h('div', { class: 'row', style: { 'margin-top': '10px' } },
+      btn('Appliquer la liste blanche', { small: true, kind: 'primary', disabled: bpState.level === 'off', onclick: () => save('allowlist') }),
+      ext.mode === 'allowlist' ? btn('Revenir au blocage des seules extensions VPN', { small: true, onclick: () => save('proxy') }) : null),
+    bpState.level === 'off' ? h('p', { class: 'small muted' }, 'Choisissez d\'abord un niveau de verrouillage.') : null);
 }
 
 function dnsLockCard(ctx) {
@@ -957,7 +1091,9 @@ function dnsLockCard(ctx) {
   const rows = (lock.adapters || []).map((a) => h('tr', null,
     h('td', null, a.name), h('td', { class: 'mono small' }, (a.v4 || []).join(', ') || '—'),
     h('td', { class: 'mono small' }, (a.v6 || []).join(', ') || '—'),
-    h('td', null, a.ok ? badge('Filtré', 'ok', 'check') : badge('Non filtré', 'danger', 'alert'))));
+    h('td', null, a.relaxed === 'trusted' ? badge(`Confiance : ${a.network}`, 'ok', 'wifi')
+      : a.relaxed === 'captive' ? badge('Fenêtre de connexion', 'warn', 'clock')
+        : a.ok ? badge('Filtré', 'ok', 'check') : badge('Non filtré', 'danger', 'alert'))));
   return card('DNS verrouillé', 'lock', 'Force le filtre familial sur toutes les cartes réseau (IPv4 et IPv6, y compris le partage de connexion d\'un téléphone) et bloque les autres serveurs DNS et les DNS chiffrés publics (Google, Cloudflare 1.1.1.1, Quad9, NextDNS…).',
     settingRow(lock.active ? 'Verrouillé' : 'Non verrouillé', lock.active ? 'Le PC réapplique le verrouillage toutes les 2 minutes.' : null,
       switchEl(!!lock.active, async (on) => {
@@ -1102,6 +1238,7 @@ function tabApps(ctx, box) {
     }))));
 
   put(box, h('div', { class: 'stack' },
+    antiPortableCard(ctx),
     card('Bloquer un programme', 'plus', 'Le programme ne pourra plus être lancé sur ce PC, par aucun utilisateur.',
       h('div', { class: 'inline-form' }, field('Nom du programme', exe), field('Nom affiché', label),
         btn('Bloquer', { kind: 'primary', icon: 'plus', onclick: async () => { await add(exe.value, label.value); } }),
@@ -1111,6 +1248,47 @@ function tabApps(ctx, box) {
         h('thead', null, h('tr', null, h('th', null, 'Programme'), h('th', null, 'Type'), h('th', null, 'Fichier'), h('th', null, 'Bloqué'), h('th', null, ''))),
         h('tbody', null, rows)))
         : h('p', { class: 'muted' }, 'Aucun programme bloqué.'))));
+}
+
+const APPLOCKER_MODES = [
+  ['off', 'Désactivé', 'Les programmes portables (navigateur copié dans Téléchargements, clé USB…) peuvent être lancés.'],
+  ['audit', 'Observation', 'Rien n\'est bloqué : le PC note ce qui le serait. Approuvez ci-dessous les programmes légitimes (Roblox, Discord, Spotify…), puis activez le blocage.'],
+  ['enforce', 'Blocage', 'Le compte enfant ne peut lancer que les programmes installés (Windows, Program Files) et ceux que vous avez approuvés.'],
+];
+
+function antiPortableCard(ctx) {
+  const st = ctx.device.state.applocker || { mode: 'off', exceptions: [], events: [] };
+  const report = ((ctx.device.state.compliance || {}).report) || {};
+  const children = (report.accounts || []).filter((a) => a.child);
+  const setMode = async (mode) => {
+    if (mode === 'enforce' && !(await confirmDialog('Le compte enfant ne pourra plus lancer que les programmes installés et ceux que vous avez approuvés. Les comptes des parents ne sont pas concernés. Continuer ?', { ok: 'Activer le blocage' }))) return;
+    await ctx.exec('applocker.set', { mode }, `Mode anti-portable : ${APPLOCKER_MODES.find((m) => m[0] === mode)[1]}`);
+  };
+  const current = APPLOCKER_MODES.find((m) => m[0] === st.mode) || APPLOCKER_MODES[0];
+  const events = st.events || [];
+  const approved = new Set((st.exceptions || []).map((e) => e.publisher ? `${e.publisher}|${e.product}` : e.hash));
+  return card('Mode anti-portable (comptes enfants)', 'usb', 'Empêche le compte enfant de lancer un programme qu\'il a copié ou téléchargé (navigateur portable, VPN, jeu sur clé USB), même renommé.',
+    !children.length ? banner('warn', 'users', h('p', null, 'Indiquez d\'abord le compte Windows de l\'enfant dans l\'onglet Sécurité.')) : null,
+    h('div', { class: 'segmented', role: 'group', 'aria-label': 'Mode anti-portable' }, APPLOCKER_MODES.map(([key, label]) =>
+      h('button', { type: 'button', class: key === st.mode ? 'active' : null, disabled: !children.length && key !== 'off', onclick: () => setMode(key).catch(showError) }, label))),
+    h('p', { class: 'small muted', style: { 'margin-top': '10px' } }, current[2]),
+    st.mode !== 'off' ? h('div', null,
+      h('div', { class: 'row', style: { 'margin-bottom': '8px' } }, h('h4', { style: { margin: 0 } }, st.mode === 'audit' ? 'Programmes qui seraient bloqués' : 'Programmes bloqués récemment'),
+        h('div', { class: 'spacer' }), btn('Relire le journal', { small: true, icon: 'refresh', onclick: () => ctx.exec('applocker.refresh', {}, 'Lecture du journal anti-portable', { quiet: true }) })),
+      events.length ? h('div', { class: 'table-wrap' }, h('table', null, h('tbody', null, events.slice(0, 40).map((e) => {
+        const key = e.suggestion ? (e.suggestion.kind === 'publisher' ? `${e.suggestion.publisher}|${e.suggestion.product}` : e.suggestion.hash) : '';
+        return h('tr', null,
+          h('td', null, h('strong', null, e.name), h('div', { class: 'mono small muted' }, e.path)),
+          h('td', { class: 'small' }, e.signed ? badge(e.publisher.split(',')[0].replace('O=', ''), 'info') : badge('Non signé', 'warn'),
+            h('div', { class: 'muted' }, `${e.count} fois${e.blocked ? `, ${e.blocked} bloqué(s)` : ''}`)),
+          h('td', { class: 'actions' }, approved.has(key) ? badge('Autorisé', 'ok', 'check') : e.suggestion ? btn('Autoriser', {
+            small: true, onclick: () => ctx.exec('applocker.allow', { exception: e.suggestion }, `Autoriser ${e.suggestion.label || e.name}`),
+          }) : null));
+      })))) : h('p', { class: 'small muted' }, 'Rien pour l\'instant.'),
+      (st.exceptions || []).length ? h('details', null, h('summary', null, `Programmes approuvés (${st.exceptions.length})`),
+        h('ul', { class: 'items' }, st.exceptions.map((e) => h('li', null, h('span', null, e.label, e.kind === 'hash' ? ' (empreinte : à ré-approuver après une mise à jour)' : ' (éditeur)'),
+          btn('Retirer', { small: true, onclick: () => ctx.exec('applocker.remove', { id: e.id }, `Retirer l'autorisation de ${e.label}`) }))))) : null) : null,
+    h('p', { class: 'small muted' }, 'En cas de problème sur le PC : « HOTS Hosts.exe --agent-applocker-off » dans une invite de commandes administrateur lève immédiatement le blocage.'));
 }
 
 async function installedDialog(ctx, add) {
@@ -1409,7 +1587,7 @@ const TAB_RENDERERS = {
 
 async function viewAccount(_m, token) {
   const main = shell('account', h('div', { class: 'loading' }, h('span', { class: 'spinner' })));
-  const [acc, codes, events, alertConf] = await Promise.all([api('GET', '/api/account/users'), api('GET', '/api/enroll-codes'), api('GET', '/api/events'), api('GET', '/api/account/settings')]);
+  const [acc, codes, events, alertConf, netPolicy, netSeen] = await Promise.all([api('GET', '/api/account/users'), api('GET', '/api/enroll-codes'), api('GET', '/api/events'), api('GET', '/api/account/settings'), api('GET', '/api/account/networks'), api('GET', '/api/account/networks/seen')]);
   if (token !== S.navToken) return;
   const u = S.boot.user;
   const isOwner = u.role === 'owner' || u.is_superadmin;
@@ -1466,6 +1644,8 @@ async function viewAccount(_m, token) {
     h('div', { style: { height: '16px' } }),
     alertSettingsCard(alertConf, isOwner),
     h('div', { style: { height: '16px' } }),
+    trustedNetworksCard(netPolicy, netSeen.seen || [], isOwner),
+    h('div', { style: { height: '16px' } }),
     card('Personnes ayant accès à ce compte', 'users', 'Par exemple l\'autre parent : chacun a son identifiant et voit les mêmes PC.',
       usersTable,
       isOwner ? h('div', { class: 'row end', style: { 'margin-top': '12px' } }, btn('Ajouter une personne', {
@@ -1510,6 +1690,32 @@ async function viewAccount(_m, token) {
           h('td', { class: 'nowrap small', title: fmtDate(ev.created_at) }, fmtAgo(ev.created_at)),
           h('td', null, ev.message), h('td', { class: 'small muted' }, ev.user || ev.device || '—'), h('td', { class: 'small muted mono' }, ev.ip || '—'))))))
         : h('p', { class: 'muted' }, 'Aucun événement.')));
+}
+
+function trustedNetworksCard(policy, seen, isOwner) {
+  const trusted = policy.trusted || [];
+  seen = seen.filter((n) => !isTrusted(n, trusted));
+  const save = async (next) => { await api('PUT', '/api/account/networks', next); render(); };
+  return card('Réseaux de confiance (établissements, travail)', 'wifi',
+    'Sur ces réseaux, les PC du compte utilisent le DNS et le proxy du réseau (l\'établissement filtre déjà). Partout ailleurs, le filtre familial s\'applique. Reconnaissance par nom du Wi-Fi ET adresse de la passerelle : un téléphone renommé comme le Wi-Fi du collège n\'est pas reconnu.',
+    trusted.length ? h('div', { class: 'table-wrap' }, h('table', null,
+      h('thead', null, h('tr', null, h('th', null, 'Réseau'), h('th', null, 'Reconnaissance'), h('th', null, 'Proxy'), h('th', null, ''))),
+      h('tbody', null, trusted.map((n) => h('tr', null,
+        h('td', null, h('strong', null, n.name), h('div', { class: 'small muted' }, [n.ssid && `Wi-Fi « ${n.ssid} »`, n.gateway_mac].filter(Boolean).join(' · '))),
+        h('td', { class: 'small' }, MATCH_LABELS[n.match] || n.match),
+        h('td', { class: 'small' }, proxyText(n.proxy)),
+        h('td', { class: 'actions' }, isOwner ? [
+          btn('', { kind: 'ghost', icon: 'edit', label: 'Modifier', onclick: () => trustedNetworkDialog(n, render) }),
+          btn('', { kind: 'ghost', icon: 'trash', label: 'Retirer', onclick: async () => { if (await confirmDialog(`Retirer « ${n.name} » des réseaux de confiance ?`, { ok: 'Retirer', danger: true })) await save({ ...policy, trusted: trusted.filter((x) => x.id !== n.id) }); } }),
+        ] : null)))))) : h('p', { class: 'muted' }, 'Aucun réseau de confiance.'),
+    isOwner ? h('div', { class: 'row', style: { 'margin-top': '12px' } }, btn('Ajouter un réseau', { icon: 'plus', onclick: () => trustedNetworkDialog(null, render) })) : null,
+    seen.length ? h('div', null, h('h4', { style: { margin: '16px 0 6px' } }, 'Réseaux rencontrés par vos PC qui bloquent le filtre'),
+      seen.slice(0, 8).map((n) => settingRow(n.ssid ? `Wi-Fi « ${n.ssid} »` : `Réseau filaire (${n.gateway})`,
+        `${n.kind === 'captive' ? 'Portail de connexion' : 'Impose son DNS'} · passerelle ${n.gateway_mac || '?'} · ${(n.devices || []).join(', ')} · ${fmtAgo(n.last)}`,
+        isOwner ? btn('Faire confiance', { small: true, icon: 'check', onclick: () => trustedNetworkDialog({ ssid: n.ssid, gateway_mac: n.gateway_mac, match: n.ssid && n.gateway_mac ? 'ssid+gateway' : n.ssid ? 'ssid' : 'gateway' }, render) }) : null))) : null,
+    settingRow('Wi-Fi publics : fenêtre de connexion de 10 minutes', 'Hôtel, gare, restaurant : le temps de passer la page de connexion, puis le filtre revient (2 fois par heure au plus, et signalé dans les alertes).',
+      switchEl(policy.captive_portal !== false, async (on) => { await api('PUT', '/api/account/networks', { ...policy, captive_portal: on }); toast('Réglage enregistré', 'ok'); return true; },
+        { disabled: !isOwner, label: 'Fenêtre de connexion des Wi-Fi publics' })));
 }
 
 function alertSettingsCard(conf, isOwner) {

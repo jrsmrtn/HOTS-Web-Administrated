@@ -64,6 +64,10 @@ jobs:
             --include-module=hosts_editor.compliance `
             --include-module=hosts_editor.core_browser_policy `
             --include-module=hosts_editor.core_dnslock `
+            --include-module=hosts_editor.core_networks `
+            --include-module=hosts_editor.core_applocker `
+            --include-module=hosts_editor.core_hardening `
+            --include-module=hosts_editor.core_safesearch `
             --include-package-data=certifi `
             --enable-plugin=pyside6 `
             --nofollow-import-to=PIL `

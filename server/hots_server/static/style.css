@@ -420,6 +420,10 @@ ol.todo li .btn { margin-left: 8px; }
 ul.items { margin: 8px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: .88rem; }
 ul.items .btn { margin-top: 4px; }
 .alerts-card { border-left: 4px solid var(--danger); }
+.ext-section { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+.ext-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 16px; margin-top: 8px; }
+.ext-list .badge { margin-left: 6px; }
+h4 { font-size: .95rem; }
 .alerts-card .setting .icon-badge { width: 34px; height: 34px; }
 
 /* ---------- Responsive ---------- */

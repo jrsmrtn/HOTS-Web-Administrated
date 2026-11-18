@@ -25,7 +25,7 @@ GOODBYE_PATH = "/api/agent/goodbye"
 POLL_TIMEOUT = 70            # server holds the request up to ~25 s
 STATE_REFRESH = 15 * 60      # periodic full state upload
 PERIODIC_CHECKS = 30 * 60    # netblock exclusions, auto-repair, compliance
-FAST_CHECKS = 120            # DNS lock: cover new adapters (phone tethering...) quickly
+FAST_CHECKS = 30             # networks: captive portals, trusted networks, new adapters
 MAX_BACKOFF = 120
 
 
@@ -73,13 +73,14 @@ def goodbye(cfg: dict) -> None:
 
 class Agent:
     def __init__(self, cfg: dict, executor, state_builder, info_builder, periodic=None,
-                 stop_event: threading.Event = None, lang: str = "fr", periodic_fast=None):
+                 stop_event: threading.Event = None, lang: str = "fr", periodic_fast=None, on_config=None):
         """
         executor(action, params, lang) -> (ok, result, error, mutating)
         state_builder(lang) -> dict
         info_builder() -> dict  (hostname, os, versions...)
         periodic(agent) -> bool  (every PERIODIC_CHECKS s, worker thread; True = state changed)
         periodic_fast(agent) -> bool  (every FAST_CHECKS s)
+        on_config(agent, response) -> None  (settings pushed by the console in each poll response)
         """
         self.cfg = cfg
         self.executor = executor
@@ -87,6 +88,7 @@ class Agent:
         self.info_builder = info_builder
         self.periodic = periodic
         self.periodic_fast = periodic_fast
+        self.on_config = on_config
         self._last_fast = 0.0
         self.stop_event = stop_event or threading.Event()
         self.lang = lang
@@ -163,6 +165,9 @@ class Agent:
             if state is not None:
                 self._pending_state = state
 
+    def run_fast_checks_soon(self) -> None:
+        self._last_fast = 0.0
+
     def _maybe_periodic(self):
         now = time.monotonic()
         if self.periodic_fast and now - self._last_fast >= FAST_CHECKS:
@@ -234,6 +239,11 @@ class Agent:
             connected = True
             if isinstance(resp.get("lang"), str):
                 self.lang = resp["lang"][:5]
+            if self.on_config:
+                try:
+                    self.on_config(self, resp)
+                except Exception:
+                    log.exception("console settings could not be applied")
             if resp.get("request_state"):
                 self._state_due = True
             for cmd in resp.get("commands") or []:

@@ -223,7 +223,8 @@ def test_scans_find_portable_browsers_extensions_and_vpn(tmp_path):
     assert set(found) == {"tor.exe", "opera.exe", "psiphon3.exe"}
     assert found["psiphon3.exe"]["kind"] == "vpn"
     exts = compliance.scan_proxy_extensions(profiles)
-    assert exts == [{"profile": "Lea", "browser": "Google Chrome", "id": "abc", "name": "VPN Gratuit", "required": True}]
+    assert exts == [{"profile": "Lea", "browser": "Google Chrome", "id": "abc", "family": "chromium",
+                     "name": "VPN Gratuit", "required": True}]
     assert {"profile": "Lea", "name": "Mon VPN"} in compliance.scan_native_vpn(profiles)
 
 

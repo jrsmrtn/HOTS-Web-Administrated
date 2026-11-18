@@ -122,6 +122,8 @@ MIGRATIONS = (
     ("devices", "alerts_muted_until", "REAL"),
     ("accounts", "offline_alert_hours", "INTEGER NOT NULL DEFAULT 48"),
     ("accounts", "email_alerts", "INTEGER NOT NULL DEFAULT 1"),
+    ("accounts", "network_policy_json", "TEXT"),
+    ("devices", "last_net_event", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 

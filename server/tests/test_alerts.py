@@ -115,3 +115,27 @@ def test_schema_migration_adds_columns(fresh_db):
     db.init()
     row = db.q1("SELECT offline_alert_hours, email_alerts FROM accounts WHERE name = 'ancien'")
     assert row["offline_alert_hours"] == 48 and row["email_alerts"] == 1
+
+
+def test_network_policy_api_and_delivery(admin):
+    creds, auth = _enroll(admin)
+    bad = admin.put("/api/account/networks", json={"trusted": [{"name": "Collège", "ssid": "College"}]})
+    assert bad.status_code == 400 and "passerelle" in bad.json()["detail"]
+    good = admin.put("/api/account/networks", json={"captive_portal": True, "trusted": [
+        {"name": "Collège", "ssid": "College-Pedago", "gateway_mac": "00-1A-2B-3C-4D-5E",
+         "proxy": {"mode": "fixed", "server": "proxy.college.lan:3128"}}]}).json()
+    assert good["trusted"][0]["gateway_mac"] == "00:1a:2b:3c:4d:5e" and good["trusted"][0]["id"]
+    r = admin.post("/api/agent/poll", json={"results": []}, headers=auth).json()
+    assert r["network_policy"]["trusted"][0]["proxy"]["server"] == "proxy.college.lan:3128"
+
+
+def test_network_events_become_journal_and_alerts(admin):
+    creds, auth = _enroll(admin)
+    events = [{"id": 1, "kind": "trusted", "message": "Réseau de confiance « Collège »"},
+              {"id": 2, "kind": "captive_open", "message": "Portail de connexion probable sur « Gare »"}]
+    admin.post("/api/agent/results", json={"results": [], "state": {"networks": {"events": events}}}, headers=auth)
+    admin.post("/api/agent/results", json={"results": [], "state": {"networks": {"events": events}}}, headers=auth)
+    found = _alerts(admin)
+    assert "Gare" in found["network"]["message"]
+    journal = [e["message"] for e in admin.get("/api/events").json()["events"] if e["kind"] == "network"]
+    assert len(journal) == 2  # not duplicated by the second push

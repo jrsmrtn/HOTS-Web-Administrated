@@ -19,7 +19,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 sys.modules.setdefault("winreg", types.ModuleType("winreg"))  # catalogs only, nothing touches the registry
 
-from hosts_editor import compliance  # noqa: E402
+from hosts_editor import compliance, core_networks  # noqa: E402
+from hosts_editor.core_applocker import clean_exception, summarize_events  # noqa: E402
 from hosts_editor.core import _parse_line  # noqa: E402
 from hosts_editor.core_antispy import ITEMS  # noqa: E402
 from hosts_editor.core_doh import BROWSERS  # noqa: E402
@@ -72,8 +73,45 @@ class DemoPC:
         self.hosts_lock_undone = True
         self.report = None
         self.boot = time.time() - 3 * 3600
+        # Phase 2
+        self.wifi = {"name": "Wi-Fi", "ssid": "College-Pedago", "gateway": "10.20.0.1",
+                     "gateway_mac": "00:1a:2b:3c:4d:5e", "dns": ["10.20.0.10", "10.20.0.11"], "domain": "college.lan"}
+        self.net_policy = core_networks.clean_policy({})
+        self.net_state = {"seen": [{"key": "ssid:Gare-SNCF|gw:aa:bb:cc:00:11:22", "ssid": "Gare-SNCF",
+                                    "gateway": "172.16.0.1", "gateway_mac": "aa:bb:cc:00:11:22", "domain": "",
+                                    "kind": "captive", "first": time.time() - 7200, "last": time.time() - 7000, "count": 1}],
+                          "events": [{"id": 1, "at": time.time() - 7200, "kind": "captive_open", "key": "gare",
+                                      "message": "Portail de connexion probable sur « Gare-SNCF » : filtre DNS suspendu 10 minutes sur ce réseau."},
+                                     {"id": 2, "at": time.time() - 7000, "kind": "captive_closed", "key": "gare",
+                                      "message": "Filtre DNS rétabli sur « Gare-SNCF » (connexion au portail réussie)"}],
+                          "next_event_id": 3}
+        self.applocker = {"mode": "off", "exceptions": [], "method": None}
+        child = "S-1-5-21-10-20-30-1002"
+        self.applocker_events = summarize_events([
+            {"id": 8003, "time": "2026-11-18T09:10:00Z", "user": child,
+             "path": r"%OSDRIVE%\USERS\LEA\APPDATA\LOCAL\ROBLOX\VERSIONS\ROBLOXPLAYERBETA.EXE", "hash": "0x" + "CD" * 32,
+             "fqbn": r"O=ROBLOX CORPORATION, L=SAN MATEO, S=CALIFORNIA, C=US\ROBLOX\ROBLOXPLAYERBETA.EXE\1.0"},
+            {"id": 8003, "time": "2026-11-18T09:40:00Z", "user": child,
+             "path": r"%OSDRIVE%\USERS\LEA\DOWNLOADS\TOR BROWSER\BROWSER\FIREFOX.EXE", "hash": "0x" + "EF" * 32, "fqbn": "-"},
+            {"id": 8003, "time": "2026-11-18T08:00:00Z", "user": child,
+             "path": r"%OSDRIVE%\USERS\LEA\APPDATA\LOCAL\DISCORD\APP-1.0.9\DISCORD.EXE", "hash": "0x" + "AA" * 32,
+             "fqbn": r"O=DISCORD INC., L=SAN FRANCISCO, S=CALIFORNIA, C=US\DISCORD\DISCORD.EXE\1.0.9"}], [child])
+        self.hardening = {"hide_settings": False, "machine_proxy": False, "block_protocols": False, "drift": []}
+        self.safesearch = {"google": False, "youtube": "off", "bing": False, "ips": {}}
+        self.extensions = {"mode": "proxy", "chromium": [], "firefox": []}
+        self.child_private_off = False
+
+    def _networks(self):
+        plan = core_networks.decide([self.wifi], cf_ok=False, policy=self.net_policy, state=self.net_state,
+                                    now=time.time(), dns_enforced=self.cf or self.dns_lock)
+        self.net_state = plan["state"]
+        return plan
 
     def _adapters(self):
+        relax = (self.net_state.get("relax") or {}).get("Wi-Fi")
+        if relax:
+            return [{"name": "Wi-Fi", "dhcp": True, "v4": list(self.wifi["dns"]), "v6": [], "ok": relax["reason"] == "trusted",
+                     "relaxed": relax["reason"], "network": relax["network"], "until": relax.get("until")}]
         cf = self.cf or self.dns_lock
         wifi_v4 = ["1.1.1.3", "1.0.0.3"] if cf else ["192.168.1.1"]
         wifi_v6 = ["2606:4700:4700::1113", "2606:4700:4700::1003"] if self.dns_lock else ["2a01:cb00:12::1"]
@@ -106,13 +144,23 @@ class DemoPC:
             "proxy_extensions": [{"profile": "Lea", "browser": "Google Chrome", "id": "bihmplhobchoageeokmgbdihknkjbknd",
                                   "name": "Touch VPN", "required": True}],
         }
+        data["observed"]["applocker"] = {"wanted": self.applocker["mode"], "drift": False,
+                                         "would_block": len(self.applocker_events), "blocked": 0}
+        data["observed"]["hardening"] = dict(self.hardening, drift=False)
+        data["observed"]["safesearch"] = {"google": self.safesearch["google"], "drift": False}
         checks = compliance.evaluate(data)
         score, todo = compliance.score(checks)
         accounts = [{"sid": a["sid"], "name": a["name"], "full_name": a["full_name"], "enabled": a["enabled"],
                      "admin": a["admin"], "child": a["sid"] in self.children, "builtin": a["sid"].endswith("-500"),
                      "source": a["source"], "last_logon": "2026-11-18T08:12:00"} for a in self.accounts]
         self.report = {"score": score, "todo": todo, "checks": checks, "accounts": accounts, "errors": {},
-                       "checked_at": time.time(), "duration_s": 8.4}
+                       "checked_at": time.time(), "duration_s": 8.4, "extensions": [
+                           {"browser": "Google Chrome", "family": "chromium", "id": "bihmplhobchoageeokmgbdihknkjbknd",
+                            "name": "Touch VPN", "proxy": True, "profile": "Lea"},
+                           {"browser": "Google Chrome", "family": "chromium", "id": "cjpalhdlnbpafiamejdnhcphjbkeiagm",
+                            "name": "uBlock Origin", "proxy": False, "profile": "Lea"},
+                           {"browser": "Mozilla Firefox", "family": "firefox", "id": "{d10d0bf8-f5b5-c8b4-a8b2-2b9879e08c5d}",
+                            "name": "Adblock Plus", "proxy": False, "profile": "Lea"}]}
         return self.report
 
     def info(self):
@@ -123,6 +171,7 @@ class DemoPC:
     def state(self, lang="fr"):
         set_lang(lang)
         with self.lock:
+            self._networks()
             entries = [_parse_line(line) for line in self.hosts]
             return {
                 "collected_at": time.time(), "errors": {},
@@ -138,7 +187,13 @@ class DemoPC:
                 "cf_family": {"active": self.cf or self.dns_lock, "complete": all(a["ok"] for a in self._adapters()),
                               "details": " · ".join(f"{a['name']}: {', '.join(a['v4'] + a['v6'])}" for a in self._adapters()),
                               "lock": {"active": self.dns_lock, "policy": self.dns_lock, "adapters": self._adapters()}},
+                "networks": {"policy": self.net_policy, "relax": self.net_state.get("relax") or {},
+                             "seen": self.net_state.get("seen") or [], "events": (self.net_state.get("events") or [])[-20:]},
+                "applocker": dict(self.applocker, events=self.applocker_events, events_at=time.time()),
+                "hardening": self.hardening,
+                "safesearch": self.safesearch,
                 "browser_policies": {"level": self.browser_level, "safesites": self.safesites, "drift": 0,
+                                     "extensions": self.extensions, "child_private_off": self.child_private_off,
                                      "browsers": [{"id": b, "name": n, "ok": True, "drift": []} for b, n in (
                                          ("chrome", "Google Chrome"), ("edge", "Microsoft Edge"), ("brave", "Brave"),
                                          ("vivaldi", "Vivaldi"), ("chromium", "Chromium"), ("firefox", "Mozilla Firefox"))]},
@@ -226,6 +281,37 @@ class DemoPC:
             repaired = ["verrou du fichier hosts"] if self.hosts_lock_undone else []
             self.hosts_lock_undone = False
             return ok({"repaired": repaired})
+        if action == "applocker.set":
+            if p["mode"] != "off" and not self.children:
+                return False, None, "Déclarez d'abord le compte Windows de l'enfant (onglet Sécurité).", True
+            self.applocker["mode"] = p["mode"]
+            self.applocker["method"] = None if p["mode"] == "off" else "local"
+            return ok({"mode": p["mode"]})
+        if action == "applocker.allow":
+            try:
+                exc = clean_exception(p.get("exception"))
+            except ValueError as e:
+                return False, None, f"Exception invalide : {e}", True
+            self.applocker["exceptions"] = [e for e in self.applocker["exceptions"] if e["id"] != exc["id"]] + [exc]
+            return ok()
+        if action == "applocker.remove":
+            self.applocker["exceptions"] = [e for e in self.applocker["exceptions"] if e["id"] != p["id"]]
+            return ok()
+        if action == "applocker.refresh":
+            return ok()
+        if action == "extensions.set":
+            self.extensions = {"mode": p["mode"], "chromium": p.get("chromium") or [], "firefox": p.get("firefox") or []}
+            return ok(self.extensions)
+        if action == "child_browsing.set":
+            self.child_private_off = p["private_off"]
+            return ok()
+        if action == "network_hardening.set":
+            self.hardening.update({k: p[k] for k in ("hide_settings", "machine_proxy", "block_protocols")})
+            return ok()
+        if action == "safesearch.set":
+            self.safesearch.update({"google": p.get("google") is True, "youtube": p.get("youtube", "off"),
+                                    "bing": p.get("bing") is True})
+            return ok(self.safesearch)
         if action == "agent.set_options":
             self.auto_repair = p["auto_repair"]
             return ok({"auto_repair": self.auto_repair})
@@ -314,7 +400,14 @@ def main():
     pc = DemoPC(args.name)
     cfg = enroll(args.server, args.code, pc.info())
     print(f"{args.name} connecté ({cfg['device_id']}) — Ctrl+C pour arrêter", flush=True)
-    agent = Agent(cfg, executor=pc.execute, state_builder=pc.state, info_builder=pc.info)
+    def on_config(agent, resp):
+        if "network_policy" in resp:
+            policy = core_networks.clean_policy(resp["network_policy"])
+            if policy != pc.net_policy:
+                pc.net_policy = policy
+                agent._state_due = True
+
+    agent = Agent(cfg, executor=pc.execute, state_builder=pc.state, info_builder=pc.info, on_config=on_config)
     try:
         agent.run()
     except KeyboardInterrupt:

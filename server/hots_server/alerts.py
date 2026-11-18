@@ -8,6 +8,7 @@ Event alerts (resolved by "Marquer comme lu", or automatically after 7 days):
   reenrolled    the PC was connected again with a new code (reinstall?)
   machine_changed  a "new" PC with the hostname of an existing one (Windows reinstalled?)
   uninstalled   HOTS Hosts was uninstalled from the PC
+  network       filter suspended for a captive portal, or a network that blocks the filter
 """
 
 import logging
@@ -20,7 +21,7 @@ from . import db
 
 log = logging.getLogger("hots_server.alerts")
 
-EVENT_KINDS = ("reenrolled", "machine_changed", "uninstalled")
+EVENT_KINDS = ("reenrolled", "machine_changed", "uninstalled", "network")
 EVENT_TTL = 7 * 86400
 REBOOTS_THRESHOLD = 6
 NONCOMPLIANT_SCORE = 60

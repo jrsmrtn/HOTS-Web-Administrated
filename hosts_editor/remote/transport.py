@@ -96,6 +96,19 @@ class Transport:
         self.auth = auth
         self.timeout = timeout
         self._ctx = build_ssl_context() if self.server_url.startswith("https://") else None
+        self._proxy = None
+        self._opener = None
+
+    def set_proxy(self, server) -> None:
+        """Explicit proxy imposed by a trusted network (school), "host:port", or None."""
+        if server == self._proxy:
+            return
+        self._proxy = server or None
+        if self._proxy:
+            handler = urllib.request.ProxyHandler({"http": f"http://{self._proxy}", "https": f"http://{self._proxy}"})
+            self._opener = urllib.request.build_opener(handler, urllib.request.HTTPSHandler(context=self._ctx))
+        else:
+            self._opener = None
 
     @property
     def host(self) -> str:
@@ -131,7 +144,11 @@ class Transport:
             headers["Authorization"] = f"Bearer {self.auth}"
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout or self.timeout, context=self._ctx) as resp:
+            if self._opener is not None:
+                ctx_manager = self._opener.open(req, timeout=timeout or self.timeout)
+            else:
+                ctx_manager = urllib.request.urlopen(req, timeout=timeout or self.timeout, context=self._ctx)
+            with ctx_manager as resp:
                 body = resp.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as e:
             message = f"HTTP {e.code}"

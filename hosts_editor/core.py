@@ -760,7 +760,9 @@ def _strip_unmarked_entries(lines: list, domains: set) -> list:
 
 def toggle_parental_control(enable: bool, list_path: str = None,
                              tag_suffix: str = "xxx.txt",
-                             comment: str = "Secure") -> bool:
+                             comment: str = "Secure", mapping: dict = None) -> bool:
+    """Write (enable) or remove a tagged block. Entries come from `list_path` (blocked: 0.0.0.0) or,
+    when `mapping` {domain: ip} is given, point each domain to an IP (e.g. Google SafeSearch)."""
     if not os.path.exists(HOSTS_PATH):
         return False
     if HostsLockManager.is_active():
@@ -787,9 +789,12 @@ def toggle_parental_control(enable: bool, list_path: str = None,
             drop = _parental_block_indices(lines, start_tag, end_tag)
             new_lines = [line for i, line in enumerate(lines) if i not in drop]
 
-            if enable and list_path and os.path.exists(list_path):
-                blocked = set()
-                with open(list_path, "r", encoding="utf-8", errors="replace") as lf:
+            targets = {}
+            if enable and mapping:
+                targets = {str(d).lower(): str(ip) for d, ip in mapping.items() if "." in str(d) and is_valid_ip(str(ip))}
+            if enable and (targets or (list_path and os.path.exists(list_path))):
+                blocked = set(targets)
+                with open(list_path if not targets else os.devnull, "r", encoding="utf-8", errors="replace") as lf:
                     for line in lf:
                         line = line.strip()
                         if not line or line.startswith("#"):
@@ -803,7 +808,7 @@ def toggle_parental_control(enable: bool, list_path: str = None,
                     new_lines = _strip_unmarked_entries(new_lines, blocked)
                     block_lines = [f"{start_tag}\n"]
                     for domain in sorted(blocked):
-                        block_lines.append(_format_entry_line("0.0.0.0", domain, comment) + "\n")
+                        block_lines.append(_format_entry_line(targets.get(domain, "0.0.0.0"), domain, comment) + "\n")
                     block_lines.append(f"{end_tag}\n")
 
                     active_total = sum(

@@ -207,6 +207,32 @@ def apply_uninstall_choices(choices: dict) -> dict:
     except Exception as e:
         report["errors"].append(f"browser_policies: {e}")
 
+    try:
+        from .core_applocker import AppLockerManager
+        if AppLockerManager.current()["mode"] != "off" and not AppLockerManager.set_mode("off"):
+            report["errors"].append(f"applocker: {AppLockerManager.last_error}")
+    except Exception as e:
+        report["errors"].append(f"applocker: {e}")
+
+    try:
+        from .core_hardening import NetworkHardeningManager
+        if any(NetworkHardeningManager.current().values()) and not NetworkHardeningManager.disable_all():
+            report["errors"].append(f"network_hardening: {NetworkHardeningManager.last_error}")
+    except Exception as e:
+        report["errors"].append(f"network_hardening: {e}")
+    try:
+        # SafeSearch points domains to fixed IPs: never leave it behind (it would go stale).
+        from .core import toggle_parental_control
+        from .core_safesearch import TAG as _SAFESEARCH_TAG
+        toggle_parental_control(False, tag_suffix=_SAFESEARCH_TAG)
+    except Exception as e:
+        report["errors"].append(f"safesearch: {e}")
+    try:
+        from .core_browser_policy import BrowserPolicyManager
+        BrowserPolicyManager.set_child_private_off(False)
+    except Exception as e:
+        report["errors"].append(f"child_browsing: {e}")
+
     failed_apps = _remove_all_appblocks()
     if failed_apps:
         report["errors"].append(f"appblock: {failed_apps}")

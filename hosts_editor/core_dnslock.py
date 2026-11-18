@@ -166,12 +166,14 @@ def _rule_exists(name: str) -> bool:
     return r is not None and r.returncode == 0
 
 
-def _add_rules() -> bool:
+def _add_rules(extra=()) -> bool:
+    """(Re)create the rules. `extra`: DNS servers of a trusted network / captive portal window."""
     try:
         from .remote.config import netblock_exclusions
         keep = netblock_exclusions()
     except Exception:
         keep = []
+    keep = list(keep) + [ip for ip in _clean_ips(extra)]
     ok = True
     for name, proto, port, remote in firewall_rules(keep):
         _netsh(["advfirewall", "firewall", "delete", "rule", f"name={name}"])
@@ -202,16 +204,29 @@ def _save_state(state: dict) -> None:
     atomic_write_json(STATE_FILE, state)
 
 
+def _relaxed() -> dict:
+    try:
+        from .core_networks import relaxed_adapters
+        return relaxed_adapters()
+    except Exception:
+        return {}
+
+
 def adapters() -> list:
-    """[{name, dhcp, v4, v6, ok}] for every active adapter."""
+    """[{name, dhcp, v4, v6, ok, relaxed}] for every active adapter. An adapter on a trusted network
+    (school…) counts as filtered: that network filters itself."""
     from .dns_utils import get_active_interfaces, _parallel_dns_info
     interfaces = get_active_interfaces()
     info = _parallel_dns_info(interfaces)
+    relaxed = _relaxed()
     out = []
     for iface in interfaces:
         dhcp, v4 = info.get(iface, (False, []))
         v6 = _v6_servers(iface)
-        out.append({"name": iface, "dhcp": bool(dhcp), "v4": v4, "v6": v6, "ok": interface_ok(v4, v6)})
+        r = relaxed.get(iface) or {}
+        ok = interface_ok(v4, v6) or r.get("reason") == "trusted"
+        out.append({"name": iface, "dhcp": bool(dhcp), "v4": v4, "v6": v6, "ok": ok,
+                    "relaxed": r.get("reason"), "network": r.get("network"), "until": r.get("until")})
     return out
 
 
@@ -299,7 +314,8 @@ class DnsLockManager:
             state = _load_state()
             v6_backup = dict(state.get("v6_backup") or {})
             v4_backup = _load_dns_backup() or {}
-            interfaces = get_active_interfaces()
+            relaxed = _relaxed()
+            interfaces = [i for i in get_active_interfaces() if i not in relaxed]
             info = _parallel_dns_info(interfaces)
             for iface in interfaces:
                 _dhcp, v4 = info.get(iface, (False, []))
@@ -318,19 +334,77 @@ class DnsLockManager:
             state["v6_backup"] = v6_backup
             _save_state(state)
             exists, _t, data = reg_read(POLICY_PATH, POLICY_NAME)
-            if not exists or data != POLICY_VALUE:
+            if not relaxed and (not exists or data != POLICY_VALUE):
                 try:
                     reg_write(POLICY_PATH, POLICY_NAME, 1, POLICY_VALUE)
                     repaired.append("stratégie NameServer")
                 except OSError:
                     pass
             if not all(_rule_exists(name) for name in RULE_NAMES):
-                _add_rules()
+                _add_rules(state.get("allowed_extra") or [])
                 repaired.append("règles du pare-feu DNS")
         if repaired:
             _flush_dns()
             logger.info("dnslock: repaired %s", repaired)
         return repaired
+
+    @staticmethod
+    def apply_relax(old: dict, new: dict, lock: bool) -> bool:
+        """Suspend / restore the filter adapter by adapter (trusted network, captive portal window).
+        Also used when only the family DNS filter is on (lock=False): then only adapter DNS changes."""
+        from .core_browser_policy import reg_read, reg_write, reg_delete
+        from .dns_utils import _load_dns_backup, get_active_interfaces, set_dns_for_interface
+        changed = False
+        with DnsLockManager._lock:
+            state = _load_state()
+            v4_backup = _load_dns_backup() or {}
+            v6_backup = state.get("v6_backup") or {}
+            active = set(get_active_interfaces())
+            from .dns_utils import get_dns_info
+            for iface, info in new.items():
+                prev = old.get(iface)
+                if prev and prev.get("key") == info.get("key") and iface in active:
+                    _dhcp, current = get_dns_info(iface)
+                    if not (current and all(s in CF_V4 for s in current)):
+                        continue  # already on the network's own DNS
+                set_dns_for_interface(iface, _clean_ips(v4_backup.get(iface, [])))  # the network's own DNS
+                if lock:
+                    _set_v6(iface, _clean_ips(v6_backup.get(iface, [])))
+                changed = True
+                logger.info("dns filter suspended on %s (%s)", iface, info.get("reason"))
+            for iface in old:
+                if iface not in new and iface in active:
+                    set_dns_for_interface(iface, list(CF_V4))
+                    if lock:
+                        _set_v6(iface, list(CF_V6))
+                    changed = True
+                    logger.info("dns filter restored on %s", iface)
+            if lock:
+                extra = sorted({ip for info in new.values() for ip in _clean_ips(info.get("dns"))}
+                               | {ip for iface in new if iface in active for ip in _v6_servers(iface)
+                                  if ip not in CF_V6})
+                if extra != sorted(state.get("allowed_extra") or []):
+                    _add_rules(extra)
+                    state["allowed_extra"] = extra
+                    _save_state(state)
+                    changed = True
+                exists, _t, data = reg_read(POLICY_PATH, POLICY_NAME)
+                try:
+                    if new and exists and data == POLICY_VALUE:
+                        original = state.get("policy_original") or {}
+                        if original.get("exists"):
+                            reg_write(POLICY_PATH, POLICY_NAME, original.get("type") or 1, original.get("data"))
+                        else:
+                            reg_delete(POLICY_PATH, POLICY_NAME)
+                        changed = True
+                    elif not new and (not exists or data != POLICY_VALUE):
+                        reg_write(POLICY_PATH, POLICY_NAME, 1, POLICY_VALUE)
+                        changed = True
+                except OSError as e:
+                    logger.warning("dnslock: NameServer policy not updated: %s", e)
+        if changed:
+            _flush_dns()
+        return changed
 
     @staticmethod
     def status(include_rules: bool = True) -> dict:

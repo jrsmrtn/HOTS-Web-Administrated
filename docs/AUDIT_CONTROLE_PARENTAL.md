@@ -10,7 +10,7 @@
 > | P1.4 Mot de passe (ACL du registre, 8 car., migration de l'ancien hash), mutex de l'agent, verrou d'écriture inter-processus + rechargement GUI, auto-réparation, NAT64, applis par profil, refus de `http://` | ✅ | `secure_storage.py`, `core.py`, `app.py`, `remote/service.py`… |
 > | P1.5 Alertes (hors ligne, ré-enrôlement, Windows réinstallé, désinstallation, redémarrages, non-conformité), mode absence, e-mail SMTP | ✅ | `server/hots_server/alerts.py` |
 >
-> Testé sous Linux : 48 tests automatiques, plus un parcours navigateur complet avec un PC simulé.
+> Testé sous Linux : 70 tests automatiques (phases 1 et 2), plus un parcours navigateur complet avec un PC simulé.
 > Les points ci-dessous **restent à vérifier sur un vrai Windows** (protocoles §3.6) :
 >
 > - **T2** : prise en compte de la stratégie `NameServer` sur Windows **Famille** (couche de défense supplémentaire, sans effet si elle est ignorée) ;
@@ -19,6 +19,27 @@
 > - temps d'exécution réel du bilan (PowerShell + parcours des dossiers).
 >
 > La « première ouverture » de l'application qui demanderait « Quel compte utilise votre enfant ? » n'est pas faite : le choix se fait dans la console (onglet Sécurité).
+>
+> **Phase 2 implémentée** (même branche) :
+>
+> | Mesure | État | Où |
+> |---|---|---|
+> | **Réseaux de confiance et portails captifs** (ajout : le DNS verrouillé ne doit pas couper un élève du réseau de son établissement ni d'un Wi-Fi public) | ✅ | `hosts_editor/core_networks.py`, Mon compte → Réseaux de confiance |
+> | P2.1 Mode anti-portable (AppLocker pour les seuls comptes enfants, observation → blocage, exceptions éditeur/empreinte depuis le journal) | ✅ | `hosts_editor/core_applocker.py` |
+> | P2.2 VPN et proxy de Windows (pages masquées, proxy par machine, protocoles VPN) | ✅ (RasMan non désactivé : trop risqué) | `hosts_editor/core_hardening.py` |
+> | P2.3 Liste blanche d'extensions | ✅ | `core_browser_policy.py` |
+> | P2.4 Navigation privée désactivée par enfant (HKU) | ✅ (stratégies « privées » uniquement : les stratégies machine priment pour le reste) | `core_browser_policy.py` |
+> | P2.5 SafeSearch / YouTube / Bing par le fichier hosts | ✅ | `hosts_editor/core_safesearch.py` |
+> | P2.6 Détection d'altérations | ✅ | `hosts_editor/compliance.py` |
+> | P2.7 Plages horaires | ⏸ non fait (fonction absente de l'agent) | — |
+>
+> À vérifier sur Windows en plus de la phase 1 :
+>
+> - **T5** : AppLocker sur Windows Famille. Si la stratégie locale n'est pas appliquée, l'agent bascule sur le CSP AppLocker (pont WMI MDM) ; la console indique le mode retenu ;
+> - lecture du journal `Microsoft-Windows-AppLocker/EXE and DLL` ;
+> - `SettingsPageVisibility` et `ProxySettingsPerUser` sur Famille ;
+> - détection du SSID et de la MAC de passerelle (`netsh wlan`, `arp`) avec Windows en français ;
+> - SafeSearch : adresses de `forcesafesearch.google.com`, `restrict(moderate).youtube.com` et `strict.bing.com` résolues par le DNS familial.
 
 
 *Date : 18/11/2026. Base : commit `467161a` (v2.5) + copie de travail en cours (agent `hosts_editor/remote/`). Les numéros de ligne renvoient à l'état du dépôt à cette date et peuvent bouger avec le développement en parallèle ; les noms de fonctions servent de repère stable.*

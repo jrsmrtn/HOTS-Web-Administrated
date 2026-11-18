@@ -5,6 +5,7 @@
   --agent-install-task                    re-register + start the task if this PC is connected
   --agent-stop                            stop the running agent (before files are replaced)
   --agent-uninstall                       stop, unregister, notify the server, forget credentials
+  --agent-applocker-off                   emergency: lift the anti-portable mode (admin prompt)
 
 The agent runs as a scheduled task rather than a Windows service: no extra dependency,
 restart-on-failure handled by the Task Scheduler, and a standard (child) account cannot stop it.
@@ -260,6 +261,19 @@ def periodic_checks(agent) -> bool:
         drift = NetBlockManager.check_drift()
         if drift:
             log.info("Internet block drift: %s", drift)
+    try:
+        from .actions import refresh_safesearch
+        if refresh_safesearch():
+            changed = True
+    except Exception:
+        log.exception("SafeSearch refresh failed")
+    from ..core_applocker import AppLockerManager
+    if AppLockerManager.current()["mode"] != "off":
+        try:
+            AppLockerManager.refresh_events()
+            changed = True
+        except Exception:
+            log.exception("AppLocker events could not be read")
     if time.monotonic() - _last_compliance >= COMPLIANCE_EVERY or not compliance.cached_report():
         _last_compliance = time.monotonic()
         compliance.build_report()
@@ -267,12 +281,43 @@ def periodic_checks(agent) -> bool:
     return changed
 
 
+_last_dns_reapply = 0.0
+DNS_REAPPLY_EVERY = 120
+
+
 def fast_checks(agent) -> bool:
-    """Every 2 min: the DNS lock covers adapters that just appeared (USB tethering, new Wi-Fi)."""
+    """Every 30 s: trusted networks and captive portals (core_networks), proxy of the current
+    network; every 2 min: the DNS lock covers adapters that just appeared (USB tethering...)."""
+    global _last_dns_reapply
+    changed = False
+    from .. import core_networks
+    from ..core_browser_policy import BrowserPolicyManager
     from ..core_dnslock import DnsLockManager
-    if not DnsLockManager.is_active():
-        return False
-    return bool(DnsLockManager.reapply())
+    from ..dns_utils import has_dns_backup
+    if DnsLockManager.is_active() or has_dns_backup() or BrowserPolicyManager.current()["level"] != "off" \
+            or core_networks.load_policy()["trusted"]:
+        result = core_networks.tick()
+        changed = result["changed"]
+        proxy = result.get("proxy") or {}
+        agent.transport.set_proxy(proxy.get("server") if proxy.get("mode") == "fixed" else None)
+    try:
+        if BrowserPolicyManager.apply_child_policies():  # child logged in: per-child browser policies
+            changed = True
+    except Exception:
+        log.exception("per-child browser policies failed")
+    if DnsLockManager.is_active() and time.monotonic() - _last_dns_reapply >= DNS_REAPPLY_EVERY:
+        _last_dns_reapply = time.monotonic()
+        changed = bool(DnsLockManager.reapply()) or changed
+    return changed
+
+
+def on_console_config(agent, resp: dict) -> None:
+    """Settings pushed by the console with every poll (account network policy)."""
+    if "network_policy" in resp:
+        from .. import core_networks
+        if core_networks.save_policy(resp.get("network_policy")):
+            log.info("network policy updated by the console")
+            agent.run_fast_checks_soon()
 
 
 def run_agent() -> int:
@@ -306,7 +351,8 @@ def run_agent() -> int:
             config.write_status(connected=False)
             return EXIT_OK
         agent = Agent(cfg, executor=actions.execute, state_builder=_state_builder,
-                      info_builder=actions.system_info, periodic=periodic_checks, periodic_fast=fast_checks)
+                      info_builder=actions.system_info, periodic=periodic_checks, periodic_fast=fast_checks,
+                      on_config=on_console_config)
         try:
             agent.run()
         except Exception:
@@ -383,6 +429,10 @@ def main(argv: list, launcher_script: str = "") -> int:
     if flag == "--agent-stop":
         stop_agent()
         return EXIT_OK
+    if flag == "--agent-applocker-off":
+        # Emergency: lift the anti-portable mode from the PC itself (administrator command prompt).
+        from ..core_applocker import AppLockerManager
+        return EXIT_OK if AppLockerManager.set_mode("off") else EXIT_ERROR
     if flag == "--agent-uninstall":
         disconnect(notify_server=True)
         return EXIT_OK

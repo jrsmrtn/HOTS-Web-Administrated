@@ -218,6 +218,37 @@ Elles peuvent être envoyées **par e-mail**, une fois que l'administrateur du s
 l'envoi (**Administration → Envoi d'e-mails**, avec un bouton d'e-mail de test). Vacances, PC rangé :
 le **mode absence** (onglet Outils du PC) suspend les alertes « hors ligne » jusqu'à la date choisie.
 
+### Établissements scolaires et Wi-Fi publics
+
+Le filtre DNS familial et le **DNS verrouillé** empêcheraient de se connecter aux réseaux qui imposent
+leur propre DNS : la page de connexion d'un hôtel, d'une gare ou d'un Wi-Fi invité, et la plupart des
+réseaux d'établissement (filtrage obligatoire, noms internes de l'ENT, proxy).
+
+- **Réseaux de confiance** (**Mon compte → Réseaux de confiance**, pour tous les PC du compte) : sur
+  ces réseaux, le PC utilise le DNS et, si besoin, le **proxy** de l'établissement (détection
+  automatique, fichier PAC ou proxy fixe). Les navigateurs verrouillés utilisent ce proxy et l'agent
+  aussi. Le réseau est reconnu par le **nom du Wi-Fi ET l'adresse de sa passerelle** : un téléphone
+  renommé comme le Wi-Fi du collège n'est pas reconnu. Un établissement client déclare son réseau une
+  seule fois pour tous ses élèves.
+- **Wi-Fi publics** : si le DNS filtré ne répond pas sur un réseau inconnu, le filtre est suspendu
+  **10 minutes** sur ce réseau, le temps de passer la page de connexion. Il revient dès que la
+  connexion est faite. Au plus 2 fenêtres par heure, et aucune nouvelle fenêtre pendant 1 heure si le
+  réseau bloque toujours. Chaque fenêtre apparaît dans les alertes. Les listes de blocage, les
+  navigateurs verrouillés et le blocage des DNS chiffrés restent actifs pendant la fenêtre.
+- **Réseaux rencontrés** : les réseaux qui ont bloqué le filtre sont listés (sur le PC et dans Mon
+  compte), avec un bouton **« Faire confiance »** qui préremplit le nom et l'adresse de la passerelle.
+
+### Encore plus difficile à contourner
+
+| Fonction | Où | Effet |
+|---|---|---|
+| **Mode anti-portable** | Applications | Le **compte enfant seulement** ne peut lancer que les programmes installés (Windows, Program Files) et ceux que vous approuvez : navigateur portable, VPN ou jeu copié dans Téléchargements ou sur une clé USB ne démarrent pas, même renommés. Commencez par **Observation** (rien n'est bloqué, la console liste ce qui le serait, bouton « Autoriser »), puis **Blocage**. Urgence sur le PC : `"HOTS Hosts.exe" --agent-applocker-off` dans une invite de commandes administrateur. |
+| **Extensions : liste blanche** | Protections → Navigateurs verrouillés | Seules les extensions cochées restent installées (Chrome, Edge, Brave, Firefox…). |
+| **Navigation privée des enfants** | Protections → Navigateurs verrouillés | Incognito, InPrivate et fenêtres privées désactivés pour les comptes enfants uniquement. |
+| **Recherche et vidéos filtrées partout** | Contrôle parental | SafeSearch Google et Bing, mode restreint YouTube, imposés à tous les navigateurs et applications par le fichier hosts. |
+| **VPN et proxy intégrés à Windows** | Protections | Masque les pages VPN et Proxy des Paramètres, proxy réglé pour tout le PC, blocage optionnel des protocoles VPN IKEv2, L2TP et PPTP. Le blocage des protocoles concerne aussi le VPN d'un parent. |
+| **Détection d'altérations** | Sécurité | Outils d'accessibilité remplacés (porte dérobée de l'écran de connexion), programmes détournés au lancement, nouveaux comptes ou administrateurs créés hors de la console, règles DNS par domaine. |
+
 ---
 
 ## 5. Plusieurs clients sur le même serveur
@@ -263,7 +294,7 @@ sudo /opt/hots-console/deploy.sh
 
 **Sur le PC**
 
-- L'agent n'exécute qu'une **liste fermée de 34 actions** (activer une catégorie, bloquer une
+- L'agent n'exécute qu'une **liste fermée de 42 actions** (activer une catégorie, bloquer une
   application, modifier une entrée hosts…). Il n'existe **aucune** commande « exécuter un
   programme » ou « écrire un fichier quelconque » : même un serveur compromis ne peut pas s'en
   servir pour prendre la main sur les PC.

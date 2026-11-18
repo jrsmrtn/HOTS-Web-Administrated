@@ -120,3 +120,35 @@ def test_agent_survives_server_outage(tmp_path, monkeypatch):
     stop.set()
     thread.join(timeout=5)
     assert config.load() is not None  # credentials kept: only a 401 from the server removes them
+
+
+def test_stale_agent_cannot_steal_commands_after_reenroll(live_server, tmp_path, monkeypatch):
+    """A PC re-enrolled while its old agent is still long-polling: the next command must reach the new agent."""
+    import asyncio
+    from hots_server import db
+
+    console = httpx.Client(base_url=live_server, headers={"x-hots-csrf": "1"}, timeout=30)
+    console.post("/api/setup", json={"token": db.get_meta("setup_token"), "email": "p@example.com", "password": "motdepasse-parent"})
+    code = console.post("/api/enroll-codes", json={}).json()["code"]
+    body = {"code": code, "hostname": "PC", "machine_id": "same-machine"}
+    old = httpx.post(f"{live_server}/api/agent/enroll", json=body).json()
+
+    async def scenario():
+        async with httpx.AsyncClient(base_url=live_server, timeout=30) as client, \
+                httpx.AsyncClient(base_url=live_server, timeout=30, cookies=console.cookies,
+                                  headers={"x-hots-csrf": "1"}) as admin:
+            old_poll = asyncio.create_task(client.post("/api/agent/poll", json={},
+                                                       headers={"Authorization": f"Bearer {old['device_id']}.{old['token']}"}))
+            await asyncio.sleep(0.5)
+            new = (await client.post("/api/agent/enroll", json=body)).json()
+            assert new["device_id"] == old["device_id"]
+            new_poll = asyncio.create_task(client.post("/api/agent/poll", json={},
+                                                       headers={"Authorization": f"Bearer {new['device_id']}.{new['token']}"}))
+            await asyncio.sleep(0.5)
+            await admin.post(f"/api/devices/{new['device_id']}/commands", json={"action": "agent.ping"})
+            old_resp, new_resp = await asyncio.gather(old_poll, new_poll)
+            return old_resp, new_resp
+
+    old_resp, new_resp = asyncio.run(scenario())
+    assert old_resp.status_code == 401
+    assert [c["action"] for c in new_resp.json()["commands"]] == ["agent.ping"]
