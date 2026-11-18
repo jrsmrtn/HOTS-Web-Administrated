@@ -80,3 +80,33 @@ def test_audit_events_become_suggestions():
     # the suggestions are accepted as exceptions as-is
     al.clean_exception(roblox["suggestion"])
     al.clean_exception(dict(tor["suggestion"], file_length=0))
+
+
+def test_store_apps_stay_allowed():
+    """Regression: with only the Exe collection, Windows blocked every Store app once AppLocker was on
+    (Microsoft Store, Photos, HEIF extension: "bloquée par votre administrateur système")."""
+    for mode, enforcement in (("enforce", "Enabled"), ("audit", "AuditOnly")):
+        root = ET.fromstring(al.build_policy_xml([CHILD], mode, []))
+        appx = [c for c in root.findall("RuleCollection") if c.get("Type") == "Appx"]
+        assert len(appx) == 1 and appx[0].get("EnforcementMode") == enforcement
+        rules = appx[0].findall("FilePublisherRule")
+        assert len(rules) == 1 and rules[0].get("Action") == "Allow" and rules[0].get("UserOrGroupSid") == "S-1-1-0"
+        cond = rules[0].find("Conditions/FilePublisherCondition")
+        assert (cond.get("PublisherName"), cond.get("ProductName"), cond.get("BinaryName")) == ("*", "*", "*")
+        assert not appx[0].findall("FilePathRule")  # nothing denied among packaged apps
+    parts = al.split_collections(al.build_policy_xml([CHILD], "enforce", []))
+    assert set(parts) == {"Exe", "Appx"} and all(p.startswith("<RuleCollection") for p in parts.values())
+
+
+def test_outdated_policy_is_reapplied(tmp_path, monkeypatch):
+    monkeypatch.setattr(al, "STATE_FILE", str(tmp_path / "applocker.json"))
+    al._save_state({"mode": "enforce", "children": [CHILD], "exceptions": [], "method": "local"})  # version 1
+    monkeypatch.setattr("hosts_editor.compliance.child_sids", lambda: [CHILD])
+    monkeypatch.setattr(al, "_effective", lambda: True)
+    applied = []
+    monkeypatch.setattr(al.AppLockerManager, "_apply", staticmethod(lambda *a: applied.append(a) or True))
+    assert al.AppLockerManager.repair() is True and applied == [("enforce", [CHILD], [])]
+    al._save_state({"mode": "enforce", "children": [CHILD], "exceptions": [], "method": "local",
+                    "policy_version": al.POLICY_VERSION})
+    applied.clear()
+    assert al.AppLockerManager.repair() is False and applied == []

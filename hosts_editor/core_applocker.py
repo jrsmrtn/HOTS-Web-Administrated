@@ -86,8 +86,14 @@ def clean_exception(raw) -> dict:
     raise ValueError("type d'exception inconnu")
 
 
+# 2: Appx collection added. Without it, once AppLocker is active Windows blocks every Store app
+# (Microsoft Store, Photos, HEIF extension...) with "bloquée par votre administrateur système".
+POLICY_VERSION = 2
+
+
 def build_policy_xml(child_sids: list, mode: str, exceptions: list) -> str:
-    """AppLocker policy (Exe collection only). Packaged apps (Store) are not restricted."""
+    """AppLocker policy: Exe collection (children restricted) + Appx collection that allows every signed
+    packaged app (Store apps) for everyone, i.e. Microsoft's default packaged-app rule."""
     if mode not in ("audit", "enforce"):
         raise ValueError("mode")
     sids = [s for s in child_sids if _SID_RE.match(s)]
@@ -118,8 +124,22 @@ def build_policy_xml(child_sids: list, mode: str, exceptions: list) -> str:
             rules.append(f'<FilePathRule Id="{_rid("deny-" + sid + path)}" Name="{RULE_PREFIX} compte enfant - '
                          f'dossier Windows inscriptible" Description="" UserOrGroupSid="{sid}" Action="Deny">'
                          f'<Conditions><FilePathCondition Path={quoteattr(path)} /></Conditions></FilePathRule>')
+    appx = (f'<RuleCollection Type="Appx" EnforcementMode="{enforcement}">'
+            f'<FilePublisherRule Id="{_rid("appx-all-signed")}" Name="{RULE_PREFIX} applications du Store signées" '
+            'Description="" UserOrGroupSid="S-1-1-0" Action="Allow"><Conditions>'
+            '<FilePublisherCondition PublisherName="*" ProductName="*" BinaryName="*">'
+            '<BinaryVersionRange LowSection="0.0.0.0" HighSection="*" /></FilePublisherCondition>'
+            '</Conditions></FilePublisherRule></RuleCollection>')
     return (f'<AppLockerPolicy Version="1"><RuleCollection Type="Exe" EnforcementMode="{enforcement}">'
-            + "".join(rules) + "</RuleCollection></AppLockerPolicy>")
+            + "".join(rules) + "</RuleCollection>" + appx + "</AppLockerPolicy>")
+
+
+def split_collections(policy_xml: str) -> dict:
+    """{"Exe": "<RuleCollection ...>...</RuleCollection>", "Appx": ...} (for the AppLocker CSP)."""
+    out = {}
+    for m in re.finditer(r'<RuleCollection Type="(\w+)".*?</RuleCollection>', policy_xml, re.S):
+        out[m.group(1)] = m.group(0)
+    return out
 
 
 def parse_fqbn(fqbn: str) -> dict:
@@ -222,21 +242,27 @@ def _set_local_policy(xml: str) -> bool:
             pass
 
 
-_MDM_CLASS = "MDM_AppLocker_ApplicationLaunchRestrictions01_EXE03"
+_MDM_CLASSES = {"Exe": ("MDM_AppLocker_ApplicationLaunchRestrictions01_EXE03", "EXE"),
+                "Appx": ("MDM_AppLocker_ApplicationLaunchRestrictions01_StoreApps03", "StoreApps")}
 _MDM_NS = r"root\cimv2\mdm\dmmap"
 _MDM_PARENT = "./Vendor/MSFT/AppLocker/ApplicationLaunchRestrictions/HOTS"
 
 
-def _set_mdm_policy(rule_collection_xml) -> bool:
-    """Fallback for editions where the local AppLocker policy is not applied: AppLocker CSP."""
-    script = (f"$ErrorActionPreference='Stop'; "
-              f"Get-CimInstance -Namespace '{_MDM_NS}' -ClassName '{_MDM_CLASS}' -Filter \"ParentID='{_MDM_PARENT}'\" "
-              f"-ErrorAction SilentlyContinue | Remove-CimInstance -ErrorAction SilentlyContinue; ")
-    if rule_collection_xml:
-        escaped = rule_collection_xml.replace("'", "''")
+def _set_mdm_policy(collections) -> bool:
+    """Fallback for editions where the local AppLocker policy is not applied: AppLocker CSP.
+    collections: {"Exe": xml, "Appx": xml} or None to remove ours."""
+    script = "$ErrorActionPreference='Stop'; "
+    for cls, _iid in _MDM_CLASSES.values():
+        script += (f"Get-CimInstance -Namespace '{_MDM_NS}' -ClassName '{cls}' -Filter \"ParentID='{_MDM_PARENT}'\" "
+                   f"-ErrorAction SilentlyContinue | Remove-CimInstance -ErrorAction SilentlyContinue; ")
+    for kind, xml in (collections or {}).items():
+        if kind not in _MDM_CLASSES:
+            continue
+        cls, iid = _MDM_CLASSES[kind]
+        escaped = xml.replace("'", "''")
         script += (f"$p = [System.Security.SecurityElement]::Escape('{escaped}'); "
-                   f"New-CimInstance -Namespace '{_MDM_NS}' -ClassName '{_MDM_CLASS}' "
-                   f"-Property @{{ParentID='{_MDM_PARENT}'; InstanceID='EXE'; Policy=$p}} | Out-Null; ")
+                   f"New-CimInstance -Namespace '{_MDM_NS}' -ClassName '{cls}' "
+                   f"-Property @{{ParentID='{_MDM_PARENT}'; InstanceID='{iid}'; Policy=$p}} | Out-Null; ")
     script += "'OK'"
     r = _ps(script)
     if not _ps_ok(r):
@@ -326,9 +352,9 @@ class AppLockerManager:
         _run([os.path.join(_SYSTEM32, "sc.exe"), "start", "AppIDSvc"])
         method = "local" if _set_local_policy(xml) and _effective() else None
         if method is None:
-            collection = xml[len('<AppLockerPolicy Version="1">'):-len("</AppLockerPolicy>")]
-            method = "mdm" if _set_mdm_policy(collection) else None
+            method = "mdm" if _set_mdm_policy(split_collections(xml)) else None
         state.update({"mode": mode, "children": children, "exceptions": exceptions, "method": method,
+                      "policy_version": POLICY_VERSION,
                       "since": state.get("since") if state.get("mode") == mode else time.time()})
         _save_state(state)
         if method is None:
@@ -418,7 +444,8 @@ class AppLockerManager:
         if not children:  # no child account left: nothing to restrict
             return AppLockerManager._restore(_load_state())
         lost = cur["method"] == "local" and not _effective()
-        if sorted(cur["children"]) != sorted(children) or lost:
+        outdated = _load_state().get("policy_version") != POLICY_VERSION  # e.g. Store apps rule added
+        if sorted(cur["children"]) != sorted(children) or lost or outdated:
             return AppLockerManager._apply(cur["mode"], children, cur["exceptions"])
         return False
 

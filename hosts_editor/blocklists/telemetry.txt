@@ -3,7 +3,6 @@
 0.0.0.0	v10.vortex-win.data.microsoft.com
 0.0.0.0	client.wns.windows.com
 0.0.0.0	any.edge.bing.com
-0.0.0.0	fe3.delivery.mp.microsoft.com
 0.0.0.0	ssw.live.com
 0.0.0.0	bl3302.storage.live.com
 0.0.0.0	skyapi.live.net

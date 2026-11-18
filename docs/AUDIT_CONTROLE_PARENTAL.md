@@ -35,6 +35,7 @@
 >
 > À vérifier sur Windows en plus de la phase 1 :
 >
+> - **Corrigé (v2.8.1)** : le mode anti-portable bloquait aussi les applications du Store (Microsoft Store, Photos, extension HEIF : « bloquée par votre administrateur système »). La stratégie autorise maintenant toutes les applications du Store signées ; un PC déjà en mode anti-portable reçoit la stratégie corrigée au démarrage de l'agent ;
 > - **T5** : AppLocker sur Windows Famille. Si la stratégie locale n'est pas appliquée, l'agent bascule sur le CSP AppLocker (pont WMI MDM) ; la console indique le mode retenu ;
 > - lecture du journal `Microsoft-Windows-AppLocker/EXE and DLL` ;
 > - `SettingsPageVisibility` et `ProxySettingsPerUser` sur Famille ;

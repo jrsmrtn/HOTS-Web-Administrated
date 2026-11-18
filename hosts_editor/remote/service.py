@@ -351,6 +351,13 @@ def run_agent(launcher_script: str = "") -> int:
         secure_app_registry_key()  # app password hash: not readable by standard accounts
     except Exception:
         log.exception("could not secure the app registry key")
+    try:
+        # A policy written by an older version is re-applied (e.g. the Store apps rule of version 2).
+        from ..core_applocker import AppLockerManager
+        if AppLockerManager.repair():
+            log.info("anti-portable policy updated")
+    except Exception:
+        log.exception("anti-portable policy could not be checked")
     while True:
         cfg = config.load()
         if not cfg:
