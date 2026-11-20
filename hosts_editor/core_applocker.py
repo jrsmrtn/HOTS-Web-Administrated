@@ -151,7 +151,7 @@ _PS_FILE_INFO = (
 
 _PS_FOLDER_INFO = (
     "$ErrorActionPreference='SilentlyContinue'; "
-    "$f = @(Get-ChildItem -LiteralPath {path} -Recurse -File -Filter *.exe -Depth 6 | Select-Object -First {limit}); "
+    "$f = @(Get-ChildItem -LiteralPath {path} -Recurse -Force -File -Filter *.exe -Depth 6 | Select-Object -First {limit}); "
     "$out = @($f | ForEach-Object {{ $i = Get-AppLockerFileInformation -Path $_.FullName; if ($i) {{ "
     "$o = [ordered]@{{ hash = [string]$i.Hash.HashDataString; file = [string]$i.Hash.SourceFileName; "
     "length = [int64]$i.Hash.SourceFileLength; path = [string]$_.FullName }}; "

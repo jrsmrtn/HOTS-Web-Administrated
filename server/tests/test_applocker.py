@@ -199,3 +199,8 @@ def test_file_approval_remembers_its_program(tmp_path, monkeypatch):
         returncode=0, stdout='{"hash":"0x' + "AB" * 32 + '","file":"MCNL.EXE","length":2}', stderr=""))
     assert al.AppLockerManager.add_exception({"kind": "file", "path": r"%OSDRIVE%\MCNL\MCNL.EXE"})
     assert al.AppLockerManager.current()["exceptions"][0]["source"] == r"%OSDRIVE%\MCNL\MCNL.EXE"
+
+
+def test_folder_scan_includes_hidden_folders():
+    """Regression: MCNL keeps its programs in hidden subfolders; Get-ChildItem skips them without -Force."""
+    assert "-Recurse -Force" in al._PS_FOLDER_INFO

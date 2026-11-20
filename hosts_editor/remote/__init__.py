@@ -5,7 +5,7 @@ connection to the HOTS web console and executes a fixed whitelist of actions
 (see ``actions.py``). It never runs arbitrary commands sent by the server.
 """
 
-AGENT_VERSION = "1.3.2"
+AGENT_VERSION = "1.3.3"
 PROTOCOL_VERSION = 1
 AGENT_EXE_NAME = "HOTS Remote Agent.exe"
 TASK_NAME = "HOTS Hosts Remote Agent"
