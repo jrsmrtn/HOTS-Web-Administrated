@@ -97,12 +97,13 @@ def set_child(sid: str, is_child: bool) -> list:
 
 def options() -> dict:
     data = _read_json(OPTIONS_FILE, {})
-    return {"auto_repair": data.get("auto_repair", True) is not False}
+    return {"auto_repair": data.get("auto_repair", True) is not False,
+            "auto_update": data.get("auto_update", True) is not False}
 
 
 def set_options(**changes) -> dict:
     data = options()
-    data.update({k: v for k, v in changes.items() if k in ("auto_repair",)})
+    data.update({k: bool(v) for k, v in changes.items() if k in ("auto_repair", "auto_update") and v is not None})
     atomic_write_json(OPTIONS_FILE, data)
     return data
 

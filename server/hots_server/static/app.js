@@ -636,10 +636,35 @@ async function viewDashboard(_m, token) {
   const main = shell('devices', h('div', { class: 'loading' }, h('span', { class: 'spinner' }), 'Chargement des PC…'));
   const listBox = h('div');
   const alertsBox = h('div');
+  let latest = null;
   const paint = (devices, alertList) => {
     clear(alertsBox);
     const card = alertsCard(alertList, load);
     if (card) put(alertsBox, card, h('div', { style: { height: '16px' } }));
+    const outdatedAll = devices.filter((d) => pcOutdated(d, latest));
+    const old = outdatedAll.filter(canSelfUpdate);
+    const manual = outdatedAll.filter((d) => !canSelfUpdate(d));
+    if (manual.length) {
+      put(alertsBox, banner('info', 'download', h('p', null,
+        h('strong', null, `À mettre à jour une dernière fois à la main : ${manual.map((d) => d.name).join(', ')}.`),
+        ' Installez ', h('a', { href: SETUP_URL }, 'HOTS_Hosts_setup.exe'), ' sur ce(s) PC depuis un compte parent ; ensuite, les mises à jour se feront depuis la console ou automatiquement.')),
+      h('div', { style: { height: '16px' } }));
+    }
+    if (old.length) {
+      put(alertsBox, banner('info', 'download', h('p', null,
+        h('strong', null, `${old.length} PC ${old.length > 1 ? 'n\'ont' : 'n\'a'} pas la dernière version de HOTS Hosts (${latest.tag}).`),
+        ' Les PC éteints se mettront à jour à leur prochaine connexion.'),
+      btn(`Mettre à jour ${old.length > 1 ? `les ${old.length} PC` : 'ce PC'}`, {
+        kind: 'primary', small: true, icon: 'download', onclick: async () => {
+          if (!(await confirmDialog(`Installer HOTS Hosts ${latest.tag} sur : ${old.map((d) => d.name).join(', ')} ?`, { ok: 'Mettre à jour', iconName: 'download' }))) return;
+          for (const d of old) {
+            await api('POST', `/api/devices/${d.id}/commands`, { action: 'agent.update', params: { tag: latest.tag }, summary: `Mise à jour de HOTS Hosts vers ${latest.tag}` });
+          }
+          toast('Mise à jour lancée : les PC redémarrent leur agent dans quelques minutes.', 'ok', 7000);
+          await load();
+        },
+      })), h('div', { style: { height: '16px' } }));
+    }
     put(clear(main), 
       h('div', { class: 'page-head' },
         h('div', null, h('h1', null, 'Mes PC'), h('p', { class: 'muted' },
@@ -668,6 +693,7 @@ async function viewDashboard(_m, token) {
   };
   const load = async () => {
     const [{ devices }, { alerts }] = await Promise.all([api('GET', '/api/devices'), api('GET', '/api/alerts')]);
+    try { latest = await latestRelease(); } catch (e) { latest = null; }
     if (token === S.navToken) paint(devices, alerts.filter((a) => !a.resolved_at));
   };
   await load();
@@ -1536,6 +1562,7 @@ function tabTools(ctx, box) {
             await ctx.reload();
           },
         }))),
+      pcUpdateCard(ctx),
       absenceCard(ctx),
       card('Actions rapides', 'zap', null,
         settingRow('Vider le cache DNS', 'Applique immédiatement les changements de blocage dans les navigateurs ouverts.',
@@ -1571,6 +1598,57 @@ function absenceCard(ctx) {
             await save(Math.floor(new Date(`${date.value}T23:59:00`).getTime() / 1000));
           },
         })));
+}
+
+
+/* ---------- Mises à jour de HOTS Hosts sur les PC ---------- */
+
+function verTuple(v) { return String(v || '').replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0); }
+function verNewer(a, b) {
+  const x = verTuple(a); const y = verTuple(b);
+  for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); }
+  return false;
+}
+let latestCache = null;
+async function latestRelease() {
+  if (latestCache && Date.now() - latestCache.at < 600000) return latestCache.value;
+  const value = await api('GET', '/api/updates/latest');
+  latestCache = { at: Date.now(), value };
+  return value;
+}
+function pcOutdated(d, latest) { return !!(latest && latest.tag && d.app_version && !d.uninstalled_at && verNewer(latest.tag, d.app_version)); }
+// Agents before 1.3.0 cannot update themselves: one last manual installation on the PC.
+function canSelfUpdate(d) { return !verNewer('1.3.0', d.agent_version || '0'); }
+const SETUP_URL = 'https://github.com/jrsmrtn/HOTS-Web-Administrated/releases/latest/download/HOTS_Hosts_setup.exe';
+
+function pcUpdateCard(ctx) {
+  const d = ctx.device;
+  const up = (d.state && d.state.update) || {};
+  const body = h('div', null, h('p', { class: 'small muted' }, h('span', { class: 'spinner' }), ' Recherche de la dernière version…'));
+  latestRelease().then((latest) => {
+    const outdated = pcOutdated(d, latest);
+    const busy = ['downloading', 'installing'].includes(up.state) && up.target && verNewer(up.target, d.app_version);
+    put(clear(body),
+      h('div', { class: 'update-versions' },
+        h('div', null, h('small', { class: 'muted' }, 'Sur ce PC'), h('strong', null, d.app_version ? `v${d.app_version.replace(/^v/, '')}` : '—')),
+        h('div', null, h('small', { class: 'muted' }, 'Dernière version'), h('strong', null, latest.tag || '—'))),
+      latest.error ? banner('warn', 'alert', h('p', null, latest.error)) : null,
+      busy ? banner('info', 'refresh', h('p', null, `Mise à jour vers ${up.target} en cours sur le PC (quelques minutes). L'agent redémarre à la fin.`)) : null,
+      up.state === 'error' && up.error ? banner('danger', 'alert', h('p', null, `Dernière mise à jour échouée : ${up.error}`)) : null,
+      outdated && !canSelfUpdate(d) ? banner('info', 'info', h('p', null, 'La version installée sur ce PC ne sait pas encore se mettre à jour à distance. Installez une dernière fois ',
+        h('a', { href: SETUP_URL }, 'HOTS_Hosts_setup.exe'), ' sur le PC (depuis un compte parent) : ensuite, les mises à jour se feront d\'ici ou automatiquement.')) : null,
+      h('div', { class: 'row' },
+        outdated && !busy && canSelfUpdate(d) ? btn(`Mettre à jour vers ${latest.tag}`, {
+          kind: 'primary', icon: 'download',
+          onclick: () => ctx.exec('agent.update', { tag: latest.tag }, `Mise à jour de HOTS Hosts vers ${latest.tag}`),
+        }) : null,
+        !outdated && latest.tag ? badge('À jour', 'ok', 'check') : null),
+      settingRow('Mises à jour automatiques', 'Le PC installe tout seul les nouvelles versions (vérification toutes les 6 heures).',
+        switchEl(up.auto_update !== false, async (on) => !!(await ctx.exec('agent.set_options', { auto_update: on },
+          `${on ? 'Activer' : 'Désactiver'} les mises à jour automatiques`)), { label: 'Mises à jour automatiques' })),
+      h('p', { class: 'small muted' }, 'Le PC télécharge lui-même l\'installateur officiel sur GitHub, vérifie son empreinte SHA-256 et l\'installe sans rien demander. Il reste relié à la console.'));
+  }).catch((e) => put(clear(body), banner('warn', 'alert', h('p', null, e.message))));
+  return card('Mise à jour de HOTS Hosts', 'download', null, body);
 }
 
 /* ---------- Onglet : temps d'écran ---------- */

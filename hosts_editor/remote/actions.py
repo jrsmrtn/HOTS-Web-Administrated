@@ -548,7 +548,21 @@ def _activity_sync(p):
 @action("agent.set_options")
 def _agent_set_options(p):
     from ..compliance import set_options
-    return set_options(auto_repair=_bool(p, "auto_repair"))
+    changes = {k: p[k] for k in ("auto_repair", "auto_update") if k in p}
+    if not changes or any(not isinstance(v, bool) for v in changes.values()):
+        raise ActionError("Paramètres invalides.")
+    return set_options(**changes)
+
+
+@action("agent.update")
+def _agent_update(p):
+    """Install the given release of HOTS Hosts (downloaded from GitHub by the PC, checked with SHA-256)."""
+    from . import selfupdate
+    tag = _str(p, "tag", 20)
+    try:
+        return selfupdate.start_update(tag)
+    except (ValueError, RuntimeError) as e:
+        raise ActionError(str(e)) from None
 
 
 # --- protections -----------------------------------------------------------------------------
@@ -1150,6 +1164,12 @@ def _state_screentime():
     return monitor.get().screentime_status()
 
 
+def _state_update():
+    from . import selfupdate
+    from ..compliance import options
+    return dict(selfupdate.status(), auto_update=options()["auto_update"])
+
+
 def _state_activity():
     from . import monitor
     return monitor.get().activity_status()
@@ -1159,6 +1179,7 @@ _SECTIONS = (
     ("system", _state_system),
     ("screentime", _state_screentime),
     ("activity", _state_activity),
+    ("update", _state_update),
     ("parental", _state_parental),
     ("cf_family", _state_cf),
     ("browser_policies", _state_browser_policies),

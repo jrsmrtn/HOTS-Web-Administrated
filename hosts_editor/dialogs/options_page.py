@@ -823,6 +823,18 @@ class OptionsPage(HOTSPage):
     def _on_download_ok(self, path: str):
         self._known_update_url = None
         self._known_update_asset = None
+        # One click: run the checked installer now (silent, keeps settings and the console link), close
+        # the app so its files can be replaced; the installer starts it again when done.
+        if HOTSDialog.ask(self, T("about_install_now_title"), T("about_install_now_msg")):
+            try:
+                import subprocess
+                subprocess.Popen([path, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RELAUNCH=1"],
+                                 close_fds=True, creationflags=0x00000008 | 0x00000200)  # detached, own group
+                from PySide6.QtWidgets import QApplication
+                QTimer.singleShot(300, QApplication.instance().quit)
+                return
+            except OSError:
+                pass
         if HOTSDialog.ask(self, T("about_dl_done_title"), T("about_dl_done_msg", path=path)):
             try:
                 os.startfile(os.path.dirname(path))

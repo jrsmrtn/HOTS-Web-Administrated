@@ -408,7 +408,7 @@ sudo /opt/hots-console/deploy.sh
 | Besoin | Comment |
 |---|---|
 | **Mettre à jour la console** | En un clic depuis **Administration** (voir ci-dessus). Ou : téléchargez et dézippez la nouvelle version, puis `sudo ./deploy.sh` → « Mettre à jour ». Une sauvegarde est faite avant ; comptes et PC sont conservés. |
-| **Mettre à jour les PC** | HOTS Hosts → Options → Mises à jour (il télécharge l'installateur de ce fork), ou relancez le nouvel installateur. La liaison à la console est conservée. |
+| **Mettre à jour les PC** | **Depuis la console** : bandeau « Mettre à jour les N PC » sur la page Mes PC, ou onglet Outils du PC → « Mise à jour de HOTS Hosts ». **Automatiquement** : option « Mises à jour automatiques » (activée par défaut, vérification toutes les 6 heures). **Sur le PC** : HOTS Hosts → Options → Mises à jour → « Installer maintenant ». Le PC télécharge l'installateur officiel sur GitHub, vérifie son empreinte SHA-256 et l'installe sans rien demander ; la liaison à la console est conservée. Un PC en version antérieure à 2.9.0 doit être mis à jour une dernière fois à la main (nouvel installateur lancé sur le PC). |
 | **Sauvegarde manuelle** | Menu → « Faire une sauvegarde maintenant » (ou `sudo hots-server backup /var/backups/hots-console`). |
 | **Restaurer une sauvegarde** | `sudo systemctl stop hots-console`, copiez le fichier `hots-AAAAMMJJ-HHMMSS.db` sur `/var/lib/hots-console/hots.db` (propriétaire `hots`), puis `sudo systemctl start hots-console`. |
 | **Mot de passe oublié** | Menu → « Réinitialiser le mot de passe d'un utilisateur » (ou `sudo hots-server reset-password e-mail`). |

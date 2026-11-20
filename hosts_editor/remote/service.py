@@ -275,6 +275,12 @@ def periodic_checks(agent) -> bool:
             changed = True
         except Exception:
             log.exception("AppLocker events could not be read")
+    try:
+        from . import selfupdate
+        if selfupdate.auto_check(compliance.options()["auto_update"]):
+            changed = True
+    except Exception:
+        log.exception("automatic update check failed")
     if time.monotonic() - _last_compliance >= COMPLIANCE_EVERY or not compliance.cached_report():
         _last_compliance = time.monotonic()
         compliance.build_report()
@@ -351,6 +357,11 @@ def run_agent(launcher_script: str = "") -> int:
         secure_app_registry_key()  # app password hash: not readable by standard accounts
     except Exception:
         log.exception("could not secure the app registry key")
+    try:
+        from . import selfupdate
+        selfupdate.cleanup_after_start()  # one-shot update task and downloaded installer
+    except Exception:
+        log.exception("update cleanup failed")
     try:
         # A policy written by an older version is re-applied (e.g. the Store apps rule of version 2).
         from ..core_applocker import AppLockerManager

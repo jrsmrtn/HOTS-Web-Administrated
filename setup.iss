@@ -1,6 +1,6 @@
 
 #define MyAppName "HOTS Hosts"
-#define MyAppVersion "2.8.3"
+#define MyAppVersion "2.9.0"
 #define MyAppPublisher "Darsono"
 #define MyAppExeName "HOTS Hosts.exe"
 #define AgentExeName "HOTS Remote Agent.exe"
@@ -62,6 +62,8 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; Update started from the app ("Installer maintenant", /SILENT /RELAUNCH=1): start it again afterwards.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: RelaunchAfterUpdate
 
 [UninstallRun]
 ; Stops and unregisters the remote agent, tells the console the PC was uninstalled.
@@ -91,6 +93,11 @@ begin
     Result := Fr
   else
     Result := En;
+end;
+
+function RelaunchAfterUpdate(): Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
 end;
 
 function AgentConfigFile(): String;

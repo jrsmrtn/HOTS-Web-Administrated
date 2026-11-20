@@ -37,7 +37,7 @@ from ..version import APP_VERSION  # noqa: E402  (re-exported for the dialogs)
 
 # Fork with remote administration: updates must come from this repository, otherwise the
 # upstream installer would replace the program without the remote agent.
-GITHUB_REPO = "jrsmrtn/HOTS-Web-Administrated"
+from ..version import GITHUB_REPO  # noqa: E402
 GITHUB_API_LATEST_RELEASE = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
 # The upstream site advertises upstream versions only: no fallback for this fork.

@@ -108,6 +108,8 @@ class DemoPC:
         self.journal = core_activity.Journal(os.path.join(data_dir, "activity"))
         self.activity = {"enabled": False, "titles": True}
         self.simulated = set()
+        self.app_version = "2.5.1"
+        self.update = {"state": "", "target": "", "error": "", "auto_update": True}
         self.session_locked = False
 
     def kids(self):
@@ -258,7 +260,7 @@ class DemoPC:
 
     def info(self):
         return {"hostname": self.hostname, "os": "Windows 11 Famille 24H2 (build 26100.2314)",
-                "app_version": "2.5.1", "agent_version": AGENT_VERSION, "machine_id": "demo-" + self.hostname,
+                "app_version": self.app_version, "agent_version": AGENT_VERSION, "machine_id": "demo-" + self.hostname,
                 "last_boot": int(self.boot)}
 
     def state(self, lang="fr"):
@@ -301,6 +303,7 @@ class DemoPC:
                      "missing": it["id"] == "medium_task_usbceip"}
                     for it in ITEMS if it["level"] == lvl]} for lvl in ("basic", "medium", "advanced", "extra")]},
                 "screentime": core_screentime.status(self.kids(), self.enforcer),
+                "update": dict(self.update, version=self.app_version),
                 "activity": dict(self.activity, helpers=1 if self.activity["enabled"] else 0, children=self.kids()),
                 "hosts": {"path": r"C:\Windows\System32\drivers\etc\hosts", "size": len("\n".join(self.hosts)),
                           "lines": len(entries), "active_entries": sum(1 for e in entries if e["enabled"] is True),
@@ -341,6 +344,16 @@ class DemoPC:
                 return False, None, f"Réglage refusé : {e}", True
             self.tick()
             return ok(self._screentime(p["sid"]))
+        if action == "agent.update":
+            tag = str(p.get("tag") or "")
+            if not tag.startswith("v") or tag[1:] == self.app_version:
+                return False, None, f"HOTS Hosts est déjà en version {self.app_version} sur ce PC.", True
+            self.update.update(state="done", target=tag, error="")
+            self.app_version = tag[1:]  # a real PC downloads, checks and installs, then the agent restarts
+            return ok({"state": "installing", "target": tag})
+        if action == "agent.set_options" and "auto_update" in p:
+            self.update["auto_update"] = bool(p["auto_update"])
+            return ok({"auto_update": self.update["auto_update"]})
         if action == "activity.set":
             self.activity = {"enabled": bool(p["enabled"]),
                              "titles": self.activity["titles"] if p.get("titles") is None else bool(p["titles"])}

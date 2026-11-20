@@ -512,6 +512,21 @@ _STRINGS: dict[str, dict[str, str]] = {
         "pt": "Atualização transferida",
         "it": "Aggiornamento scaricato",
     },
+    "about_install_now_title": {
+        "en": "Install the update", "pl": "Zainstaluj aktualizację", "fr": "Installer la mise à jour",
+        "de": "Update installieren", "es": "Instalar la actualización", "ru": "Установить обновление",
+        "pt": "Instalar a atualização", "it": "Installa l'aggiornamento",
+    },
+    "about_install_now_msg": {
+        "en": "The update was downloaded and verified.\n\nInstall it now? HOTS Hosts will close and start again by itself in a minute. Your settings, protections and the link to the web console are kept.",
+        "pl": "Aktualizacja została pobrana i zweryfikowana.\n\nZainstalować ją teraz? HOTS Hosts zamknie się i uruchomi ponownie za chwilę. Ustawienia, zabezpieczenia i połączenie z konsolą internetową zostaną zachowane.",
+        "fr": "La mise à jour a été téléchargée et vérifiée.\n\nL'installer maintenant ? HOTS Hosts va se fermer puis se relancer tout seul dans une minute. Vos réglages, vos protections et la liaison à la console web sont conservés.",
+        "de": "Das Update wurde heruntergeladen und geprüft.\n\nJetzt installieren? HOTS Hosts wird geschlossen und startet in einer Minute von selbst neu. Einstellungen, Schutzmaßnahmen und die Verbindung zur Webkonsole bleiben erhalten.",
+        "es": "La actualización se ha descargado y verificado.\n\n¿Instalarla ahora? HOTS Hosts se cerrará y se volverá a abrir solo en un minuto. Se conservan tus ajustes, protecciones y la conexión con la consola web.",
+        "ru": "Обновление загружено и проверено.\n\nУстановить сейчас? HOTS Hosts закроется и через минуту запустится снова. Настройки, защита и связь с веб-консолью сохранятся.",
+        "pt": "A atualização foi transferida e verificada.\n\nInstalá-la agora? O HOTS Hosts vai fechar e reabrir sozinho dentro de um minuto. As definições, proteções e a ligação à consola web são mantidas.",
+        "it": "L'aggiornamento è stato scaricato e verificato.\n\nInstallarlo ora? HOTS Hosts si chiuderà e si riavvierà da solo tra un minuto. Impostazioni, protezioni e collegamento alla console web vengono mantenuti.",
+    },
     "about_dl_done_msg": {
         "en": "The installer was saved to:\n{path}\n\nRun it when you are ready to install the update. Open the folder now?",
         "pl": "Instalator zapisano w:\n{path}\n\nUruchom go, gdy będziesz gotowy zainstalować aktualizację. Otworzyć folder teraz?",

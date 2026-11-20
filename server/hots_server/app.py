@@ -72,6 +72,7 @@ ACTIONS = {
     "screentime.pause": True,
     "activity.set": True,
     "activity.sync": False,
+    "agent.update": True,
 }
 # Large read-only results are dropped from the history after a day.
 BULKY_RESULTS = ("get_state", "hosts.read", "apps.list_installed", "hosts.backups", "compliance.check",
@@ -957,6 +958,16 @@ async def admin_update(request: Request):
     return JSONResponse(out)
 
 
+async def latest_version(request: Request):
+    """Latest published version (any signed-in user: to offer "Mettre à jour ce PC")."""
+    current_user(request)
+    try:
+        latest = await asyncio.to_thread(updater.latest_release)
+    except Exception as e:
+        return JSONResponse({"tag": None, "url": None, "error": f"GitHub injoignable ({e})."})
+    return JSONResponse(dict(latest, error=""))
+
+
 async def admin_settings(request: Request):
     require_superadmin(request)
     if request.method == "PATCH":
@@ -1388,6 +1399,7 @@ routes = [
     Route(f"/api/admin/users/{_int_path('user_id')}/email", admin_set_user_email, methods=["POST"]),
     Route("/api/admin/settings", admin_settings, methods=["GET", "PATCH"]),
     Route("/api/admin/update", admin_update, methods=["GET", "POST"]),
+    Route("/api/updates/latest", latest_version),
     Route("/api/agent/enroll", agent_enroll, methods=["POST"]),
     Route("/api/agent/poll", agent_poll, methods=["POST"]),
     Route("/api/agent/results", agent_results, methods=["POST"]),
