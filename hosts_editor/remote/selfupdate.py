@@ -139,14 +139,50 @@ def _run(args, timeout=60):
                           creationflags=_CREATE_NO_WINDOW if sys.platform == "win32" else 0)
 
 
+def task_xml(installer: str, log_path: str) -> str:
+    """One-shot SYSTEM task running the installer. Written as XML (not schtasks /TR): the defaults of
+    schtasks /Create forbid starting on battery, so a laptop on battery never ran the update."""
+    from xml.sax.saxutils import escape
+    args = f'/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /LOG="{log_path}"'
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>HOTS Hosts - mise a jour demandee par la console</Description></RegistrationInfo>
+  <Triggers><TimeTrigger><StartBoundary>2030-01-01T00:00:00</StartBoundary><Enabled>false</Enabled></TimeTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+    <Priority>5</Priority>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>{escape(installer)}</Command><Arguments>{escape(args)}</Arguments></Exec></Actions>
+</Task>
+"""
+
+
 def _launch(installer: str, delay: float) -> None:
     """Run the installer silently as SYSTEM through a one-shot scheduled task, after `delay` seconds
     (time for the agent to send its answer to the console)."""
     time.sleep(delay)
     log_path = os.path.join(UPDATE_DIR, "setup.log")
-    command = f'"{installer}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /LOG="{log_path}"'
-    r = _run([SCHTASKS, "/Create", "/TN", TASK, "/SC", "ONCE", "/ST", "00:00", "/SD", "01/01/2030",
-              "/RU", "SYSTEM", "/RL", "HIGHEST", "/TR", command, "/F"])
+    try:
+        os.remove(log_path)
+    except OSError:
+        pass
+    xml_path = os.path.join(UPDATE_DIR, "task.xml")
+    with open(xml_path, "w", encoding="utf-16") as f:
+        f.write(task_xml(installer, log_path))
+    r = _run([SCHTASKS, "/Create", "/TN", TASK, "/XML", xml_path, "/F"])
     if r.returncode != 0:
         _save_state(state="error", error=f"tâche de mise à jour non créée : {(r.stderr or r.stdout).strip()[:200]}")
         return
@@ -185,7 +221,7 @@ def cleanup_after_start() -> None:
         target = parse(state.get("target") or "")
         ok = target is not None and installed() >= target
         _save_state(state="done" if ok else "error", at=time.time(),
-                    error="" if ok else "l'installation ne s'est pas terminée (voir update\\setup.log)")
+                    error="" if ok else "l'installation ne s'est pas terminée (journal ci-dessous)")
     if sys.platform == "win32":
         _run([SCHTASKS, "/Delete", "/TN", TASK, "/F"])
     try:
@@ -224,7 +260,39 @@ def auto_check(enabled: bool) -> bool:
         return False
 
 
+def setup_log_tail(lines: int = 40) -> str:
+    """End of the last installer log (shown in the console when an update fails)."""
+    try:
+        with open(os.path.join(UPDATE_DIR, "setup.log"), "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 16000))
+            data = f.read()
+    except OSError:
+        return ""
+    text = data.decode("utf-8", "replace") if b"\x00" not in data else data.decode("utf-16-le", "replace")
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def task_last_result() -> str:
+    """Last run result of the update task (e.g. not started on battery), '' if unknown."""
+    if sys.platform != "win32":
+        return ""
+    r = _run([SCHTASKS, "/Query", "/TN", TASK, "/V", "/FO", "LIST"], timeout=20)
+    if r.returncode != 0:
+        return ""
+    keep = [line.strip() for line in (r.stdout or "").splitlines()
+            if re.match(r"\s*(Last Result|Dernier résultat|Status|Statut|Last Run Time|Heure de la dernière exécution)", line)]
+    return " · ".join(keep)[:300]
+
+
 def status() -> dict:
     state = load_state()
-    return {"version": APP_VERSION, "state": state.get("state") or "", "target": state.get("target") or "",
-            "error": state.get("error") or "", "at": state.get("at"), "checked_at": state.get("checked_at")}
+    if state.get("state") == "installing" and time.time() - float(state.get("at") or 0) > 900:
+        # The agent is still the old one 15 minutes later: the installer did not run or failed.
+        state = _save_state(state="error", error="l'installation n'a pas abouti dans les 15 minutes (journal ci-dessous)")
+    out = {"version": APP_VERSION, "state": state.get("state") or "", "target": state.get("target") or "",
+           "error": state.get("error") or "", "at": state.get("at"), "checked_at": state.get("checked_at")}
+    if out["state"] in ("error", "installing"):
+        out["log"] = setup_log_tail()
+        out["task"] = task_last_result()
+    return out

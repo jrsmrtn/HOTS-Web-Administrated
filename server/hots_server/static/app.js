@@ -1698,6 +1698,8 @@ function pcUpdateCard(ctx) {
       latest.error ? banner('warn', 'alert', h('p', null, latest.error)) : null,
       busy ? banner('info', 'refresh', h('p', null, `Mise à jour vers ${up.target} en cours sur le PC (quelques minutes). L'agent redémarre à la fin.`)) : null,
       up.state === 'error' && up.error ? banner('danger', 'alert', h('p', null, `Dernière mise à jour échouée : ${up.error}`)) : null,
+      up.task ? h('p', { class: 'small muted' }, `Tâche de mise à jour : ${up.task}`) : null,
+      up.log ? h('details', null, h('summary', null, 'Journal de l\'installation'), h('pre', { class: 'log' }, up.log)) : null,
       outdated && !canSelfUpdate(d) ? banner('info', 'info', h('p', null, 'La version installée sur ce PC ne sait pas encore se mettre à jour à distance. Installez une dernière fois ',
         h('a', { href: SETUP_URL }, 'HOTS_Hosts_setup.exe'), ' sur le PC (depuis un compte parent) : ensuite, les mises à jour se feront d\'ici ou automatiquement.')) : null,
       h('div', { class: 'row' },

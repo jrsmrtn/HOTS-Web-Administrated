@@ -122,3 +122,19 @@ def test_latest_version_endpoint(admin, monkeypatch):
     assert admin.get("/api/updates/latest").json() == {"tag": "v2.9.0", "url": "https://x", "error": ""}
     admin.post("/api/auth/logout")
     assert admin.get("/api/updates/latest").status_code == 401
+
+
+def test_update_task_runs_on_battery_and_stuck_updates_are_reported(pc, tmp_path):
+    import xml.etree.ElementTree as ET
+    xml = su.task_xml(r"C:\ProgramData\HOTS Hosts\update\HOTS_Hosts_setup_v2.9.3.exe", r"C:\ProgramData\HOTS Hosts\update\setup.log")
+    root = ET.fromstring(xml.split("?>", 1)[1])
+    ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+    assert root.find("t:Settings/t:DisallowStartIfOnBatteries", ns).text == "false"  # laptops on battery
+    assert root.find("t:Principals/t:Principal/t:UserId", ns).text == "S-1-5-18"
+    assert '/LOG="C:\\ProgramData\\HOTS Hosts\\update\\setup.log"' in root.find("t:Actions/t:Exec/t:Arguments", ns).text
+    # still "installing" 15 minutes later: reported as failed, with the installer log
+    (tmp_path / "update").mkdir(exist_ok=True)
+    (tmp_path / "update" / "setup.log").write_text("Log opened.\nSetup is running silently.\nError: something\n")
+    su._save_state(state="installing", target="v2.9.3", at=su.time.time() - 1000)
+    st = su.status()
+    assert st["state"] == "error" and "15 minutes" in st["error"] and "Error: something" in st["log"]
