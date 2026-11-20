@@ -447,6 +447,17 @@ class DemoPC:
             ids = {e["id"] for e in new}
             self.applocker["exceptions"] = [e for e in self.applocker["exceptions"] if e["id"] not in ids] + new
             return ok()
+        if action == "applocker.diagnose":
+            approved = {e.get("source", "").replace("%OSDRIVE%", "C:") for e in self.applocker["exceptions"]}
+            tests = [{"user": c, "path": x.replace("%OSDRIVE%", "C:"), "rule": "HOTS (démo)",
+                      "decision": "Allowed" if x.upper().replace("%OSDRIVE%", "C:") in approved or self.applocker["mode"] != "enforce" else "Denied"}
+                     for x in (p.get("paths") or [])[:5] for c in self.children[:1]]
+            return ok({"counts": {"mode": "Enabled" if self.applocker["mode"] == "enforce" else "AuditOnly",
+                                  "hash": sum(1 for e in self.applocker["exceptions"] if e["kind"] == "hash"),
+                                  "publisher": 1 + sum(1 for e in self.applocker["exceptions"] if e["kind"] == "publisher"),
+                                  "path": 2 + sum(1 for e in self.applocker["exceptions"] if e["kind"] == "folder")},
+                       "tests": tests, "events": [], "mdm": 0, "service": "Running",
+                       "state": {"mode": self.applocker["mode"], "method": "local", "exceptions": len(self.applocker["exceptions"])}}, False)
         if action == "applocker.remove":
             self.applocker["exceptions"] = [e for e in self.applocker["exceptions"] if e["id"] != p["id"]]
             return ok()

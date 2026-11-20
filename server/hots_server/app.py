@@ -63,6 +63,7 @@ ACTIONS = {
     "applocker.allow": True,
     "applocker.remove": True,
     "applocker.refresh": True,
+    "applocker.diagnose": False,
     "extensions.set": True,
     "child_browsing.set": True,
     "network_hardening.set": True,

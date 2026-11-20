@@ -409,6 +409,14 @@ def _applocker_remove(p):
     return AppLockerManager.status()
 
 
+@action("applocker.diagnose", mutating=False)
+def _applocker_diagnose(p):
+    from ..compliance import child_sids
+    from ..core_applocker import diagnose
+    paths = p.get("paths") if isinstance(p.get("paths"), list) else []
+    return diagnose([x for x in paths if isinstance(x, str)], child_sids())
+
+
 @action("applocker.refresh")
 def _applocker_refresh(p):
     from ..core_applocker import AppLockerManager

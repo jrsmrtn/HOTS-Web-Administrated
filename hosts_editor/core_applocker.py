@@ -67,7 +67,7 @@ _TOO_BROAD = re.compile(
     r"^(?:%OSDRIVE%|%REMOVABLE%|%HOT%|[A-Z]:)(?:\\USERS(?:\\[^\\]+(?:\\(?:DOWNLOADS|DESKTOP|DOCUMENTS|MUSIC|PICTURES|"
     r"VIDEOS|FAVORITES|SAVED GAMES|ONEDRIVE[^\\]*|TÉLÉCHARGEMENTS|BUREAU|APPDATA(?:\\(?:LOCAL|ROAMING|LOCALLOW)"
     r"(?:\\TEMP|\\PROGRAMS|\\PACKAGES)?)?))?)?|\\PROGRAMDATA|\\TEMP|\\WINDOWS\\TEMP|\\USERS\\PUBLIC(?:\\[^\\]+)?)?$")
-MAX_FOLDER_FILES = 400
+MAX_FOLDER_FILES = 3000  # MCNL alone has several hundred programs
 
 
 def clean_folder(path) -> str:
@@ -452,6 +452,60 @@ def collect_events(days: int = 7) -> list:
 
 # --- manager -----------------------------------------------------------------------------------------------------
 
+_PS_DIAGNOSE = (
+    "$ErrorActionPreference='SilentlyContinue'; "
+    "$pol = Get-AppLockerPolicy -Effective; $x = [xml](Get-AppLockerPolicy -Effective -Xml); "
+    "$exe = $x.AppLockerPolicy.RuleCollection | Where-Object {{ $_.Type -eq 'Exe' }}; "
+    "$counts = [ordered]@{{ mode = [string]$exe.EnforcementMode; "
+    "hash = @($x.SelectNodes(\"//RuleCollection[@Type='Exe']//FileHashCondition\")).Count; "
+    "publisher = @($x.SelectNodes(\"//RuleCollection[@Type='Exe']//FilePublisherCondition\")).Count; "
+    "path = @($x.SelectNodes(\"//RuleCollection[@Type='Exe']//FilePathCondition\")).Count }}; "
+    "$users = @({users}); $paths = @({paths}); "
+    "$tests = @(foreach ($p in $paths) {{ foreach ($u in $users) {{ "
+    "if (-not (Test-Path -LiteralPath $p)) {{ [ordered]@{{ user = $u; path = $p; decision = 'Introuvable'; rule = '' }}; continue }}; "
+    "$r = $pol | Test-AppLockerPolicy -Path $p -User $u; "
+    "if (-not $r) {{ $n = (New-Object System.Security.Principal.SecurityIdentifier($u)).Translate([System.Security.Principal.NTAccount]).Value; "
+    "$r = $pol | Test-AppLockerPolicy -Path $p -User $n }}; "
+    "[ordered]@{{ user = $u; path = $p; decision = $(if ($r) {{ [string]$r.PolicyDecision }} else {{ 'Erreur' }}); rule = [string]$r.MatchingRule }} }} }}); "
+    "$ev = @(Get-WinEvent -LogName 'Microsoft-Windows-AppLocker/EXE and DLL' -MaxEvents 8 | ForEach-Object {{ "
+    "[ordered]@{{ time = $_.TimeCreated.ToString('o'); id = $_.Id; message = $_.Message }} }}); "
+    "$mdm = @(Get-CimInstance -Namespace 'root\\cimv2\\mdm\\dmmap' -ClassName 'MDM_AppLocker_ApplicationLaunchRestrictions01_EXE03').Count; "
+    "$svc = [string](Get-Service AppIDSvc).Status; "
+    "ConvertTo-Json -Depth 4 -Compress -InputObject ([ordered]@{{ counts = $counts; tests = $tests; events = $ev; mdm = $mdm; service = $svc }})")
+
+
+def diagnose(paths: list, child_sids: list) -> dict:
+    """What Windows itself says: rules in force, Test-AppLockerPolicy for each program and child account,
+    last AppLocker events. Read-only, for the console (no copy-paste on the PC needed)."""
+    real = []
+    for p in paths[:5]:
+        p = str(p or "").strip()
+        if not p or len(p) > 400 or re.search(r"[<>\"'\r\n*?|]", p):
+            continue
+        r = expand_event_path(p)
+        if r:
+            real.append(r)
+    users = [s for s in child_sids if _SID_RE.match(s)][:4]
+    r = _ps(_PS_DIAGNOSE.format(users=", ".join(_ps_quote(u) for u in users) or "''",
+                                paths=", ".join(_ps_quote(p) for p in real) or ""), timeout=240)
+    try:
+        data = json.loads((r.stdout or "").strip()) if r is not None and r.returncode == 0 else {}
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    for key in ("tests", "events"):
+        if isinstance(data.get(key), dict):
+            data[key] = [data[key]]
+        data.setdefault(key, [])
+    state = _load_state()
+    data["state"] = {"mode": state.get("mode"), "method": state.get("method"),
+                     "exceptions": len(state.get("exceptions") or []), "last_apply": state.get("last_apply") or {}}
+    if not data.get("counts"):
+        data["error"] = ((r.stderr or "") if r is not None else "PowerShell indisponible").strip()[-300:]
+    return data
+
+
 class AppLockerManager:
     last_error: str = ""
 
@@ -587,12 +641,18 @@ class AppLockerManager:
         if not real or not os.path.isdir(real):
             AppLockerManager.last_error = f"Dossier introuvable sur le PC : {real or exc['path']}"
             return []
-        r = _ps(_PS_FOLDER_INFO.format(path=_ps_quote(real), limit=MAX_FOLDER_FILES), timeout=300)
+        r = _ps(_PS_FOLDER_INFO.format(path=_ps_quote(real), limit=MAX_FOLDER_FILES + 1), timeout=1200)
         try:
             items = json.loads((r.stdout or "").strip() or "[]") if r is not None else []
         except ValueError:
             items = []
-        new = exceptions_from_folder_info(items if isinstance(items, list) else [items], exc["label"])
+        items = items if isinstance(items, list) else [items]
+        if len(items) > MAX_FOLDER_FILES:
+            # Never allow part of a folder silently (the rest would stay blocked without explanation).
+            AppLockerManager.last_error = (f"Plus de {MAX_FOLDER_FILES} programmes dans ce dossier : choisissez un "
+                                           "sous-dossier, ou « Tout le dossier ».")
+            return []
+        new = exceptions_from_folder_info(items, exc["label"])
         if not new:
             AppLockerManager.last_error = "Aucun programme (.exe) trouvé dans ce dossier."
         return new

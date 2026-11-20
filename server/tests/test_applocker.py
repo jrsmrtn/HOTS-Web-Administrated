@@ -273,3 +273,34 @@ def test_failed_application_is_reported(tmp_path, monkeypatch):
     assert not al.AppLockerManager._apply("enforce", [CHILD], _many_hash_exceptions(2))
     last = al.AppLockerManager.status()["last_apply"]
     assert last["ok"] is False and "Accès refusé" in last["error"]
+
+
+def test_diagnose_reads_what_windows_says(tmp_path, monkeypatch):
+    import json as _json
+    monkeypatch.setattr(al, "STATE_FILE", str(tmp_path / "applocker.json"))
+    seen = {}
+    out = {"counts": {"mode": "Enabled", "hash": 345, "publisher": 4, "path": 20},
+           "tests": {"user": CHILD, "path": r"C:\MCNL\OUTILS\JRE\BIN\JAVAW.EXE", "decision": "Denied", "rule": "HOTS compte enfant"},
+           "events": [], "mdm": 0, "service": "Running"}
+
+    def fake_ps(script, timeout=120):
+        seen["script"] = script
+        return types.SimpleNamespace(returncode=0, stdout=_json.dumps(out), stderr="")
+    monkeypatch.setattr(al, "_ps", fake_ps)
+    d = al.diagnose([r"%OSDRIVE%\MCNL\OUTILS\JRE\BIN\JAVAW.EXE", "C:\\x'; Remove-Item C:\\ -Recurse #"], [CHILD, "not-a-sid"])
+    assert d["counts"]["hash"] == 345 and d["tests"][0]["decision"] == "Denied"  # single object -> list
+    assert "Remove-Item" not in seen["script"] and "not-a-sid" not in seen["script"]
+    assert "JAVAW.EXE" in seen["script"] and CHILD in seen["script"]
+
+
+def test_folder_with_too_many_programs_is_refused_not_cut(tmp_path, monkeypatch):
+    """Regression: the scan stopped at 400 programs; MCNL's Java and utilities stayed blocked silently."""
+    import json as _json
+    monkeypatch.setattr(al, "STATE_FILE", str(tmp_path / "applocker.json"))
+    (tmp_path / "BIG").mkdir()
+    monkeypatch.setattr(al, "expand_event_path", lambda p: str(tmp_path / "BIG"))
+    monkeypatch.setattr(al, "MAX_FOLDER_FILES", 5)
+    items = [{"hash": f"0x{i:064X}", "file": f"P{i}.EXE", "length": 1, "path": f"C:\\BIG\\P{i}.EXE"} for i in range(6)]
+    monkeypatch.setattr(al, "_ps", lambda script, timeout=120: types.SimpleNamespace(returncode=0, stdout=_json.dumps(items), stderr=""))
+    assert not al.AppLockerManager.add_exception({"kind": "folder_scan", "path": r"C:\BIG"})
+    assert "Plus de 5 programmes" in al.AppLockerManager.last_error and al.AppLockerManager.current()["exceptions"] == []

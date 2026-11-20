@@ -873,7 +873,7 @@ async function viewDevice([id, tab], token) {
   });
 }
 
-const READ_ONLY = new Set(['agent.ping', 'get_state', 'hosts.read', 'hosts.backups', 'apps.list_installed', 'privacy.check_drift', 'compliance.check', 'activity.sync']);
+const READ_ONLY = new Set(['agent.ping', 'get_state', 'hosts.read', 'hosts.backups', 'apps.list_installed', 'privacy.check_drift', 'compliance.check', 'activity.sync', 'applocker.diagnose']);
 
 /* ---------- Onglet : contrôle parental ---------- */
 
@@ -1338,6 +1338,47 @@ async function allowFolderDialog(ctx, programPath) {
   });
 }
 
+async function applockerDiagnose(ctx, events) {
+  const choices = [...new Set((events || []).map((e) => e.path).filter(Boolean))].slice(0, 30);
+  const pick = h('select', { multiple: true, size: Math.min(8, Math.max(3, choices.length)), 'aria-label': 'Programmes à tester' },
+    choices.map((p, i) => h('option', { value: p, selected: i < 3 }, p)));
+  const other = h('input', { type: 'text', placeholder: 'ou un autre chemin, ex. C:\\MCNL\\MCNL.EXE' });
+  const run = async () => {
+    const paths = [...pick.selectedOptions].map((o) => o.value).slice(0, 4);
+    if (other.value.trim()) paths.push(other.value.trim());
+    if (!paths.length) { toast('Choisissez au moins un programme.', 'error'); return false; }
+    const cmd = await ctx.exec('applocker.diagnose', { paths }, 'Diagnostic du mode anti-portable', { quiet: true, reload: false });
+    if (!cmd || cmd.status !== 'done') return false;
+    const d = cmd.result || {};
+    const c = d.counts || {};
+    const ok = (x) => /allow/i.test(x);
+    await modal({
+      title: 'Diagnostic du mode anti-portable', iconName: 'search', wide: true,
+      body: h('div', null,
+        d.error ? banner('warn', 'alert', h('p', null, `Lecture incomplète : ${d.error}`)) : null,
+        h('p', null, h('strong', null, 'Règles en vigueur dans Windows : '),
+          `${c.hash ?? '?'} empreinte(s), ${c.publisher ?? '?'} éditeur(s), ${c.path ?? '?'} chemin(s) — mode ${c.mode || '?'}`,
+          ` · service AppIDSvc : ${d.service || '?'} · pont MDM : ${d.mdm ? 'utilisé' : 'non'}`),
+        h('p', { class: 'small muted' }, `Dans la console : ${(d.state || {}).exceptions ?? '?'} approbation(s), appliquées par ${((d.state || {}).method) === 'mdm' ? 'le pont MDM' : 'la stratégie locale'}.`),
+        h('h4', null, 'Réponse de Windows pour le compte enfant'),
+        (d.tests || []).length ? h('div', { class: 'table-wrap' }, h('table', null, h('tbody', null, d.tests.map((t) => h('tr', null,
+          h('td', { class: 'mono small' }, t.path),
+          h('td', null, badge(ok(t.decision) ? 'Autorisé' : t.decision === 'Introuvable' ? 'Fichier introuvable' : 'Bloqué', ok(t.decision) ? 'ok' : 'danger')),
+          h('td', { class: 'small muted' }, t.rule || '—')))))) : h('p', { class: 'small muted' }, 'Aucun test.'),
+        (d.events || []).length ? h('details', null, h('summary', null, `Derniers événements AppLocker (${d.events.length})`),
+          h('ul', { class: 'items' }, d.events.map((e) => h('li', null, h('span', { class: 'small' }, `${fmtDate(Date.parse(e.time) / 1000)} — ${e.message}`))))) : null),
+      actions: [{ label: 'Fermer', kind: 'primary', value: true }],
+    });
+    return true;
+  };
+  return modal({
+    title: 'Diagnostic du mode anti-portable', iconName: 'search',
+    body: h('div', null, h('p', { class: 'small' }, 'Le PC demande à Windows si ces programmes sont autorisés pour le compte enfant, et par quelle règle. Rien n\'est modifié.'),
+      field('Programmes à tester (Ctrl + clic pour en choisir plusieurs)', pick), field('Autre programme', other)),
+    actions: [{ label: 'Annuler', value: null }, { label: 'Lancer le diagnostic', kind: 'primary', onclick: run }],
+  });
+}
+
 function antiPortableCard(ctx) {
   const st = ctx.device.state.applocker || { mode: 'off', exceptions: [], events: [] };
   const report = ((ctx.device.state.compliance || {}).report) || {};
@@ -1388,7 +1429,8 @@ function antiPortableCard(ctx) {
       `Règles en place sur le PC (${st.last_apply.method === 'mdm' ? 'pont MDM' : 'stratégie locale'}) : ${st.last_apply.exceptions} programme(s) ou dossier(s) approuvé(s), ${fmtAgo(st.last_apply.at)}.`) : null,
     st.mode !== 'off' ? h('div', null,
       h('div', { class: 'row', style: { 'margin-bottom': '8px' } }, h('h4', { style: { margin: 0 } }, st.mode === 'audit' ? 'Programmes qui seraient bloqués' : 'Programmes bloqués récemment'),
-        h('div', { class: 'spacer' }), btn('Autoriser un dossier…', { small: true, icon: 'plus', onclick: () => allowFolderDialog(ctx, '') }),
+        h('div', { class: 'spacer' }), btn('Diagnostic', { small: true, icon: 'search', onclick: () => applockerDiagnose(ctx, events) }),
+        btn('Autoriser un dossier…', { small: true, icon: 'plus', onclick: () => allowFolderDialog(ctx, '') }),
         btn('Relire le journal', { small: true, icon: 'refresh', onclick: () => ctx.exec('applocker.refresh', {}, 'Lecture du journal anti-portable', { quiet: true }) })),
       events.length ? h('div', { class: 'table-wrap' }, h('table', null, h('tbody', null, events.slice(0, 40).map((e) => {
 
