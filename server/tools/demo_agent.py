@@ -93,6 +93,10 @@ class DemoPC:
              "fqbn": r"O=ROBLOX CORPORATION, L=SAN MATEO, S=CALIFORNIA, C=US\ROBLOX\ROBLOXPLAYERBETA.EXE\1.0"},
             {"id": 8003, "time": "2026-11-18T09:40:00Z", "user": child,
              "path": r"%OSDRIVE%\USERS\LEA\DOWNLOADS\TOR BROWSER\BROWSER\FIREFOX.EXE", "hash": "0x" + "EF" * 32, "fqbn": "-"},
+            {"id": 8004, "time": "2026-11-20T09:00:00Z", "user": child, "path": r"%OSDRIVE%\MCNL\MCNL.EXE",
+             "hash": "", "fqbn": "-"},
+            {"id": 8004, "time": "2026-11-20T09:01:00Z", "user": child,
+             "path": r"%OSDRIVE%\MCNL\APPS\FRANCAIS\E-VERBE.X86.EXE", "hash": "", "fqbn": "-"},
             {"id": 8003, "time": "2026-11-18T08:00:00Z", "user": child,
              "path": r"%OSDRIVE%\USERS\LEA\APPDATA\LOCAL\DISCORD\APP-1.0.9\DISCORD.EXE", "hash": "0x" + "AA" * 32,
              "fqbn": r"O=DISCORD INC., L=SAN FRANCISCO, S=CALIFORNIA, C=US\DISCORD\DISCORD.EXE\1.0.9"}], [child])
@@ -423,12 +427,25 @@ class DemoPC:
         if action == "applocker.allow":
             try:
                 exc = clean_exception(p.get("exception"))
-                if exc["kind"] == "file":  # a real PC reads the file; the demo uses a fake fingerprint
-                    exc = clean_exception({"kind": "hash", "hash": hashlib.sha256(exc["path"].encode()).hexdigest(),
-                                           "file_name": exc["label"], "label": exc["label"]})
             except ValueError as e:
                 return False, None, f"Exception invalide : {e}", True
-            self.applocker["exceptions"] = [e for e in self.applocker["exceptions"] if e["id"] != exc["id"]] + [exc]
+            # A real PC reads the files (signature or fingerprint); the demo makes fake fingerprints.
+            def fake(path):
+                name = path.rsplit("\\", 1)[-1]
+                e = clean_exception({"kind": "hash", "hash": hashlib.sha256(path.encode()).hexdigest(),
+                                     "file_name": name, "label": name})
+                return dict(e, source=path.upper())
+            if exc["kind"] == "file":
+                new = [fake(exc["path"])]
+            elif exc["kind"] == "folder_scan":
+                new = [fake(ev["path"]) for ev in self.applocker_events
+                       if ev["path"].upper().startswith(exc["path"] + "\\")]
+                if not new:
+                    return False, None, "Aucun programme (.exe) trouvé dans ce dossier.", True
+            else:
+                new = [exc]
+            ids = {e["id"] for e in new}
+            self.applocker["exceptions"] = [e for e in self.applocker["exceptions"] if e["id"] not in ids] + new
             return ok()
         if action == "applocker.remove":
             self.applocker["exceptions"] = [e for e in self.applocker["exceptions"] if e["id"] != p["id"]]

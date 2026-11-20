@@ -1287,6 +1287,49 @@ const APPLOCKER_MODES = [
   ['enforce', 'Blocage', 'Le compte enfant ne peut lancer que les programmes installés (Windows, Program Files) et ceux que vous avez approuvés.'],
 ];
 
+// Same rule as hosts_editor/core_applocker.py (_TOO_BROAD): folders the child fills himself are refused.
+const TOO_BROAD_FOLDER = /^(?:%OSDRIVE%|%REMOVABLE%|%HOT%|[A-Z]:)(?:\\USERS(?:\\[^\\]+(?:\\(?:DOWNLOADS|DESKTOP|DOCUMENTS|MUSIC|PICTURES|VIDEOS|FAVORITES|SAVED GAMES|ONEDRIVE[^\\]*|TÉLÉCHARGEMENTS|BUREAU|APPDATA(?:\\(?:LOCAL|ROAMING|LOCALLOW)(?:\\TEMP|\\PROGRAMS|\\PACKAGES)?)?))?)?|\\PROGRAMDATA|\\TEMP|\\WINDOWS\\TEMP|\\USERS\\PUBLIC(?:\\[^\\]+)?)?$/;
+
+function folderChoices(path) {
+  const parts = String(path || '').replace(/\//g, '\\').replace(/\\+$/, '').split('\\');
+  if (/\.EXE$/i.test(parts[parts.length - 1] || '')) parts.pop();
+  const out = [];
+  for (let i = parts.length; i >= 2; i--) {
+    const f = parts.slice(0, i).join('\\').toUpperCase();
+    if (TOO_BROAD_FOLDER.test(f)) break;
+    out.push(f);
+  }
+  return out;
+}
+
+async function allowFolderDialog(ctx, programPath) {
+  const choices = folderChoices(programPath);
+  const fields = choices.length
+    ? [{ name: 'path', label: 'Dossier à autoriser', type: 'select', value: choices[0], options: choices.map((f) => [f, f.replace(/^%OSDRIVE%/, 'C:')]) }]
+    : [{ name: 'path', label: 'Dossier à autoriser (chemin complet sur le PC)', placeholder: 'C:\\Users\\Lea\\AppData\\Local\\MonJeu' }];
+  fields.push({
+    name: 'mode', label: 'Que faut-il autoriser ?', type: 'select', value: 'scan', options: [
+      ['scan', 'Les programmes présents maintenant dans ce dossier (recommandé)'],
+      ['folder', 'Tout le dossier, même les programmes ajoutés plus tard (moins sûr)'],
+    ],
+  });
+  return formDialog({
+    title: 'Autoriser un dossier', iconName: 'usb', submitLabel: 'Autoriser',
+    intro: h('div', null,
+      h('p', { class: 'small' }, '« Programmes présents maintenant » : le PC autorise chaque programme du dossier et de ses sous-dossiers (par éditeur s\'il est signé, sinon par empreinte). Un programme copié plus tard dans ce dossier reste bloqué.'),
+      h('p', { class: 'small muted' }, '« Tout le dossier » convient à un logiciel qui télécharge ses propres mises à jour, mais l\'enfant pourrait y copier un autre programme. Les dossiers trop larges (Téléchargements, Bureau, AppData…) sont refusés.')),
+    fields,
+    submit: async (v) => {
+      const path = (v.path || '').trim();
+      if (!path) throw new Error('Indiquez le dossier.');
+      const label = path.split('\\').filter(Boolean).pop() || path;
+      const cmd = await ctx.exec('applocker.allow', { exception: { kind: v.mode === 'folder' ? 'folder' : 'folder_scan', path, label } },
+        v.mode === 'folder' ? `Autoriser tout le dossier ${label}` : `Autoriser les programmes du dossier ${label}`);
+      if (cmd && cmd.status === 'error') throw new Error(cmd.error || 'Le PC a refusé.');
+    },
+  });
+}
+
 function antiPortableCard(ctx) {
   const st = ctx.device.state.applocker || { mode: 'off', exceptions: [], events: [] };
   const report = ((ctx.device.state.compliance || {}).report) || {};
@@ -1307,7 +1350,24 @@ function antiPortableCard(ctx) {
   };
   const current = APPLOCKER_MODES.find((m) => m[0] === st.mode) || APPLOCKER_MODES[0];
   const events = st.events || [];
-  const approved = new Set((st.exceptions || []).map((e) => e.publisher ? `${e.publisher}|${e.product}` : e.hash));
+  // An approval matches a blocked line by publisher, by fingerprint, by the program it came from, or by folder.
+  const normHash = (x) => (x ? `0x${String(x).replace(/^0x/i, '').toUpperCase()}` : '');
+  const normPath = (x) => String(x || '').toUpperCase().replace(/^%OSDRIVE%/, 'C:').replace(/\//g, '\\');
+  const approved = new Set();
+  const approvedFolders = [];
+  for (const x of st.exceptions || []) {
+    if (x.kind === 'publisher') approved.add(`${x.publisher}|${x.product}`);
+    if (x.kind === 'hash') { approved.add(normHash(x.hash)); approved.add(`name:${String(x.file_name || '').toUpperCase()}`); }
+    if (x.source) approved.add(`path:${normPath(x.source)}`);
+    if (x.kind === 'folder') approvedFolders.push(`${normPath(x.path)}\\`);
+  }
+  const isApproved = (e) => {
+    const s = e.suggestion || {};
+    const p = normPath(e.path);
+    return (s.kind === 'publisher' && approved.has(`${s.publisher}|${s.product}`)) || (s.kind === 'hash' && approved.has(normHash(s.hash)))
+      || approved.has(`path:${p}`) || approvedFolders.some((f) => p.startsWith(f))
+      || (s.kind === 'file' && approved.has(`name:${String(e.name || '').toUpperCase()}`)); // approvals made before v2.9.1
+  };
   return card('Mode anti-portable (comptes enfants)', 'usb', 'Empêche le compte enfant de lancer un programme qu\'il a copié ou téléchargé (navigateur portable, VPN, jeu sur clé USB), même renommé.',
     !children.length ? banner('warn', 'users', h('p', null, 'Indiquez d\'abord le compte Windows de l\'enfant dans l\'onglet Sécurité.')) : null,
     h('div', { class: 'segmented', role: 'group', 'aria-label': 'Mode anti-portable' }, APPLOCKER_MODES.map(([key, label]) =>
@@ -1315,19 +1375,22 @@ function antiPortableCard(ctx) {
     h('p', { class: 'small muted', style: { 'margin-top': '10px' } }, current[2]),
     st.mode !== 'off' ? h('div', null,
       h('div', { class: 'row', style: { 'margin-bottom': '8px' } }, h('h4', { style: { margin: 0 } }, st.mode === 'audit' ? 'Programmes qui seraient bloqués' : 'Programmes bloqués récemment'),
-        h('div', { class: 'spacer' }), btn('Relire le journal', { small: true, icon: 'refresh', onclick: () => ctx.exec('applocker.refresh', {}, 'Lecture du journal anti-portable', { quiet: true }) })),
+        h('div', { class: 'spacer' }), btn('Autoriser un dossier…', { small: true, icon: 'plus', onclick: () => allowFolderDialog(ctx, '') }),
+        btn('Relire le journal', { small: true, icon: 'refresh', onclick: () => ctx.exec('applocker.refresh', {}, 'Lecture du journal anti-portable', { quiet: true }) })),
       events.length ? h('div', { class: 'table-wrap' }, h('table', null, h('tbody', null, events.slice(0, 40).map((e) => {
-        const key = e.suggestion ? (e.suggestion.kind === 'publisher' ? `${e.suggestion.publisher}|${e.suggestion.product}` : e.suggestion.hash) : '';
+
         return h('tr', null,
           h('td', null, h('strong', null, e.name), h('div', { class: 'mono small muted' }, e.path)),
           h('td', { class: 'small' }, e.signed ? badge(e.publisher.split(',')[0].replace('O=', ''), 'info') : badge('Non signé', 'warn'),
             h('div', { class: 'muted' }, `${e.count} fois${e.blocked ? `, ${e.blocked} bloqué(s)` : ''}`)),
-          h('td', { class: 'actions' }, approved.has(key) ? badge('Autorisé', 'ok', 'check') : e.suggestion ? btn('Autoriser', {
+          h('td', { class: 'actions' }, isApproved(e) ? badge('Autorisé', 'ok', 'check') : e.suggestion ? btn('Autoriser', {
             small: true, onclick: () => ctx.exec('applocker.allow', { exception: e.suggestion }, `Autoriser ${e.suggestion.label || e.name}`),
+          }) : null, !isApproved(e) && e.path && folderChoices(e.path).length ? btn('Dossier…', {
+            small: true, title: 'Autoriser tout le dossier de ce programme', onclick: () => allowFolderDialog(ctx, e.path),
           }) : null));
       })))) : h('p', { class: 'small muted' }, 'Rien pour l\'instant.'),
       (st.exceptions || []).length ? h('details', null, h('summary', null, `Programmes approuvés (${st.exceptions.length})`),
-        h('ul', { class: 'items' }, st.exceptions.map((e) => h('li', null, h('span', null, e.label, e.kind === 'hash' ? ' (empreinte : à ré-approuver après une mise à jour)' : ' (éditeur)'),
+        h('ul', { class: 'items' }, st.exceptions.map((e) => h('li', null, h('span', null, e.label, e.kind === 'hash' ? ' (empreinte : à ré-approuver après une mise à jour)' : e.kind === 'folder' ? ` (dossier entier : ${e.path})` : ' (éditeur)'),
           btn('Retirer', { small: true, onclick: () => ctx.exec('applocker.remove', { id: e.id }, `Retirer l'autorisation de ${e.label}`) }))))) : null) : null,
     h('p', { class: 'small muted' }, 'En cas de problème sur le PC : « HOTS Hosts.exe --agent-applocker-off » dans une invite de commandes administrateur lève immédiatement le blocage.'));
 }

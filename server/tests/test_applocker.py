@@ -147,3 +147,55 @@ def test_file_exception_is_resolved_on_the_pc(tmp_path, monkeypatch):
     # program on a USB stick: clear message instead of a silent failure
     assert not al.AppLockerManager.add_exception({"kind": "file", "path": r"%REMOVABLE%\JEU.EXE"})
     assert "clé USB" in al.AppLockerManager.last_error
+
+
+def test_folder_rules():
+    folder = al.clean_exception({"kind": "folder", "path": r"%OSDRIVE%\MCNL"})
+    assert folder["path"] == r"%OSDRIVE%\MCNL" and folder["label"] == "MCNL"
+    root = ET.fromstring(al.build_policy_xml([CHILD], "enforce", [folder]))
+    exe = next(c for c in root.findall("RuleCollection") if c.get("Type") == "Exe")
+    deny = next(r for r in exe.findall("FilePathRule") if r.get("Action") == "Deny" and r.find("Exceptions") is not None)
+    assert r"%OSDRIVE%\MCNL\*" in [c.get("Path") for c in deny.find("Exceptions").findall("FilePathCondition")]
+    for broad in (r"C:\Users\Lea\Downloads", r"%OSDRIVE%\USERS\LEA\APPDATA\LOCAL", "C:\\", r"C:\ProgramData", "%REMOVABLE%"):
+        with pytest.raises(ValueError):
+            al.clean_exception({"kind": "folder", "path": broad})
+        with pytest.raises(ValueError):
+            al.clean_exception({"kind": "folder_scan", "path": broad})
+
+
+def test_folder_scan_allows_what_is_there_now(tmp_path, monkeypatch):
+    monkeypatch.setattr(al, "STATE_FILE", str(tmp_path / "applocker.json"))
+    (tmp_path / "MCNL").mkdir()
+    monkeypatch.setattr(al, "expand_event_path", lambda p: str(tmp_path / "MCNL"))
+    found = [
+        {"hash": "0x" + "11" * 32, "file": "MCNL.EXE", "length": 10, "path": r"C:\MCNL\MCNL.EXE"},
+        {"hash": "0x" + "22" * 32, "file": "E-VERBE.X86.EXE", "length": 20, "path": r"C:\MCNL\APPS\FRANCAIS\E-VERBE.X86.EXE"},
+        {"hash": "0x" + "33" * 32, "file": "JAVAW.EXE", "length": 30, "path": r"C:\MCNL\OUTILS\JRE\BIN\JAVAW.EXE",
+         "publisher": "O=ORACLE AMERICA, INC., L=REDWOOD SHORES, S=CALIFORNIA, C=US", "product": "JAVA(TM) PLATFORM SE 8"},
+        {"hash": "0x" + "44" * 32, "file": "JAVA.EXE", "length": 30, "path": r"C:\MCNL\OUTILS\JRE\BIN\JAVA.EXE",
+         "publisher": "O=ORACLE AMERICA, INC., L=REDWOOD SHORES, S=CALIFORNIA, C=US", "product": "JAVA(TM) PLATFORM SE 8"},
+    ]
+    import json as _json
+    monkeypatch.setattr(al, "_ps", lambda script, timeout=120: types.SimpleNamespace(returncode=0, stdout=_json.dumps(found), stderr=""))
+    assert al.AppLockerManager.add_exception({"kind": "folder_scan", "path": r"%OSDRIVE%\MCNL", "label": "MCNL"})
+    exc = al.AppLockerManager.current()["exceptions"]
+    kinds = sorted(e["kind"] for e in exc)
+    assert kinds == ["hash", "hash", "publisher"]  # one rule per publisher, one per unsigned program, no path rule
+    assert {e["source"] for e in exc if e["kind"] == "hash"} == {r"C:\MCNL\MCNL.EXE", r"C:\MCNL\APPS\FRANCAIS\E-VERBE.X86.EXE"}
+    # scanning again does not duplicate
+    assert al.AppLockerManager.add_exception({"kind": "folder_scan", "path": r"%OSDRIVE%\MCNL"})
+    assert len(al.AppLockerManager.current()["exceptions"]) == 3
+    monkeypatch.setattr(al, "_ps", lambda script, timeout=120: types.SimpleNamespace(returncode=0, stdout="[]", stderr=""))
+    assert not al.AppLockerManager.add_exception({"kind": "folder_scan", "path": r"%OSDRIVE%\MCNL"})
+    assert "Aucun programme" in al.AppLockerManager.last_error
+
+
+def test_file_approval_remembers_its_program(tmp_path, monkeypatch):
+    monkeypatch.setattr(al, "STATE_FILE", str(tmp_path / "applocker.json"))
+    exe = tmp_path / "MCNL.EXE"
+    exe.write_bytes(b"MZ")
+    monkeypatch.setattr(al, "expand_event_path", lambda p: str(exe))
+    monkeypatch.setattr(al, "_ps", lambda script, timeout=120: types.SimpleNamespace(
+        returncode=0, stdout='{"hash":"0x' + "AB" * 32 + '","file":"MCNL.EXE","length":2}', stderr=""))
+    assert al.AppLockerManager.add_exception({"kind": "file", "path": r"%OSDRIVE%\MCNL\MCNL.EXE"})
+    assert al.AppLockerManager.current()["exceptions"][0]["source"] == r"%OSDRIVE%\MCNL\MCNL.EXE"

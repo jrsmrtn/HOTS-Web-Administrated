@@ -61,6 +61,29 @@ def _rid(seed: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, "hots-applocker:" + seed))
 
 
+# Folders too broad to be allowed: allowing them would let the child run anything he copies there.
+_TOO_BROAD = re.compile(
+    r"^(?:%OSDRIVE%|%REMOVABLE%|%HOT%|[A-Z]:)(?:\\USERS(?:\\[^\\]+(?:\\(?:DOWNLOADS|DESKTOP|DOCUMENTS|MUSIC|PICTURES|"
+    r"VIDEOS|FAVORITES|SAVED GAMES|ONEDRIVE[^\\]*|TÉLÉCHARGEMENTS|BUREAU|APPDATA(?:\\(?:LOCAL|ROAMING|LOCALLOW)"
+    r"(?:\\TEMP|\\PROGRAMS|\\PACKAGES)?)?))?)?|\\PROGRAMDATA|\\TEMP|\\WINDOWS\\TEMP|\\USERS\\PUBLIC(?:\\[^\\]+)?)?$")
+MAX_FOLDER_FILES = 400
+
+
+def clean_folder(path) -> str:
+    """'C:\\Users\\Lea\\AppData\\Local\\MCNL\\' -> 'C:\\USERS\\LEA\\APPDATA\\LOCAL\\MCNL' (upper case, no trailing
+    backslash). ValueError if invalid or too broad."""
+    folder = str(path or "").strip().strip('"').replace("/", "\\").rstrip("\\")
+    if not folder or len(folder) > 300 or re.search(r"[<>\"\r\n*?|]", folder) or "\\..\\" in folder + "\\":
+        raise ValueError("dossier invalide")
+    if not re.match(r"^(?:%OSDRIVE%|%REMOVABLE%|%HOT%|%PROGRAMFILES%|%WINDIR%|%SYSTEM32%|[A-Za-z]:)(?:\\|$)", folder):
+        raise ValueError("indiquez un chemin complet, ex. C:\\Users\\Lea\\AppData\\Local\\MonJeu")
+    folder = folder.upper()
+    if _TOO_BROAD.match(folder):
+        raise ValueError("dossier trop large : l'enfant pourrait y copier n'importe quel programme. "
+                         "Choisissez le dossier du logiciel lui-même.")
+    return folder
+
+
 def clean_exception(raw) -> dict:
     """Validate an exception coming from the console (publisher or hash)."""
     if not isinstance(raw, dict):
@@ -90,6 +113,15 @@ def clean_exception(raw) -> dict:
         if not path or len(path) > 400 or re.search(r"[<>\"\r\n*?]", path):
             raise ValueError("chemin invalide")
         return {"kind": "file", "path": path, "label": label or os.path.basename(path.replace("\\", "/"))}
+    if kind == "folder":
+        # Path rule: everything in the folder, including programs added later (less safe; broad folders refused).
+        folder = clean_folder(raw.get("path"))
+        return {"id": _rid(f"folder|{folder}")[:8], "kind": kind, "path": folder,
+                "label": label or folder.rsplit("\\", 1)[-1] or folder}
+    if kind == "folder_scan":
+        # Resolved on the PC: one publisher / hash exception per program found now in the folder.
+        folder = clean_folder(raw.get("path"))
+        return {"kind": kind, "path": folder, "label": label or folder.rsplit("\\", 1)[-1] or folder}
     raise ValueError("type d'exception inconnu")
 
 
@@ -115,6 +147,36 @@ _PS_FILE_INFO = (
     "length = [int64]$i.Hash.SourceFileLength }}; "
     "if ($i.Publisher) {{ $o.publisher = [string]$i.Publisher.PublisherName; $o.product = [string]$i.Publisher.ProductName }}; "
     "ConvertTo-Json -InputObject $o -Compress")
+
+
+_PS_FOLDER_INFO = (
+    "$ErrorActionPreference='SilentlyContinue'; "
+    "$f = @(Get-ChildItem -LiteralPath {path} -Recurse -File -Filter *.exe -Depth 6 | Select-Object -First {limit}); "
+    "$out = @($f | ForEach-Object {{ $i = Get-AppLockerFileInformation -Path $_.FullName; if ($i) {{ "
+    "$o = [ordered]@{{ hash = [string]$i.Hash.HashDataString; file = [string]$i.Hash.SourceFileName; "
+    "length = [int64]$i.Hash.SourceFileLength; path = [string]$_.FullName }}; "
+    "if ($i.Publisher) {{ $o.publisher = [string]$i.Publisher.PublisherName; $o.product = [string]$i.Publisher.ProductName }}; $o }} }}); "
+    "ConvertTo-Json -InputObject $out -Depth 3 -Compress")
+
+
+def exceptions_from_folder_info(items: list, folder_label: str) -> list:
+    """Pure: one publisher exception per (publisher, product), one hash exception per unsigned program."""
+    out, seen = [], set()
+    for info in items if isinstance(items, list) else []:
+        if not isinstance(info, dict):
+            continue
+        try:
+            exc = exception_from_file_info(info, f"{folder_label} : {info.get('file') or '?'}")
+        except ValueError:
+            continue
+        if isinstance(info.get("path"), str):
+            exc["source"] = info["path"].upper()[:400]
+        if exc["id"] not in seen:
+            seen.add(exc["id"])
+            if exc["kind"] == "publisher":
+                exc["label"] = f"{folder_label} : {exc['product']}"
+            out.append(exc)
+    return out
 
 
 def exception_from_file_info(info: dict, label: str) -> dict:
@@ -149,6 +211,8 @@ def build_policy_xml(child_sids: list, mode: str, exceptions: list) -> str:
             exc.append(f'<FilePublisherCondition PublisherName={quoteattr(e["publisher"])} '
                        f'ProductName={quoteattr(e["product"])} BinaryName="*">'
                        '<BinaryVersionRange LowSection="*" HighSection="*" /></FilePublisherCondition>')
+        elif e["kind"] == "folder":
+            exc.append(f'<FilePathCondition Path={quoteattr(e["path"] + chr(92) + "*")} />')
         elif e["kind"] == "hash":
             exc.append(f'<FileHashCondition><FileHash Type="SHA256" Data={quoteattr(e["hash"])} '
                        f'SourceFileName={quoteattr(e["file_name"])} SourceFileLength="{int(e["file_length"])}" />'
@@ -439,12 +503,19 @@ class AppLockerManager:
     @staticmethod
     def add_exception(raw) -> bool:
         exc = clean_exception(raw)
+        new = [exc]
         if exc["kind"] == "file":
             exc = AppLockerManager._resolve_file(exc)
             if exc is None:
                 return False
+            new = [exc]
+        elif exc["kind"] == "folder_scan":
+            new = AppLockerManager._resolve_folder(exc)
+            if not new:
+                return False
+        ids = {e["id"] for e in new}
         cur = AppLockerManager.current()
-        exceptions = [e for e in cur["exceptions"] if e["id"] != exc["id"]] + [exc]
+        exceptions = [e for e in cur["exceptions"] if e["id"] not in ids] + new
         if cur["mode"] == "off":
             state = _load_state()
             state["exceptions"] = exceptions
@@ -466,11 +537,30 @@ class AppLockerManager:
         r = _ps(_PS_FILE_INFO.format(path=_ps_quote(real)))
         try:
             info = json.loads((r.stdout or "").strip().splitlines()[-1]) if r is not None and r.returncode == 0 else None
-            return exception_from_file_info(info or {}, exc["label"])
+            resolved = exception_from_file_info(info or {}, exc["label"])
+            resolved["source"] = exc["path"].upper()[:400]
+            return resolved
         except (ValueError, IndexError, TypeError) as e:
             logger.warning("Get-AppLockerFileInformation %s: %s / %s", real, e, ((r.stderr or "") if r else "")[:300])
             AppLockerManager.last_error = "Windows n'a pas pu lire la signature ou l'empreinte de ce programme."
             return None
+
+    @staticmethod
+    def _resolve_folder(exc: dict) -> list:
+        """Publisher / hash exceptions for the programs found now in the folder (and its subfolders)."""
+        real = expand_event_path(exc["path"])
+        if not real or not os.path.isdir(real):
+            AppLockerManager.last_error = f"Dossier introuvable sur le PC : {real or exc['path']}"
+            return []
+        r = _ps(_PS_FOLDER_INFO.format(path=_ps_quote(real), limit=MAX_FOLDER_FILES), timeout=300)
+        try:
+            items = json.loads((r.stdout or "").strip() or "[]") if r is not None else []
+        except ValueError:
+            items = []
+        new = exceptions_from_folder_info(items if isinstance(items, list) else [items], exc["label"])
+        if not new:
+            AppLockerManager.last_error = "Aucun programme (.exe) trouvé dans ce dossier."
+        return new
 
     @staticmethod
     def remove_exception(exc_id: str) -> bool:
