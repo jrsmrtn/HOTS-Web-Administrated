@@ -1381,6 +1381,11 @@ function antiPortableCard(ctx) {
     h('div', { class: 'segmented', role: 'group', 'aria-label': 'Mode anti-portable' }, APPLOCKER_MODES.map(([key, label]) =>
       h('button', { type: 'button', class: key === st.mode ? 'active' : null, disabled: !children.length && key !== 'off', onclick: () => setMode(key).catch(showError) }, label))),
     h('p', { class: 'small muted', style: { 'margin-top': '10px' } }, current[2]),
+    st.mode !== 'off' && st.last_apply && st.last_apply.ok === false ? banner('danger', 'alert', h('p', null,
+      h('strong', null, 'La dernière modification n\'a pas été appliquée sur le PC. '), st.last_apply.error || '',
+      ' Les programmes listés comme approuvés peuvent donc encore être bloqués : réessayez, ou repassez en Observation.')) : null,
+    st.mode !== 'off' && st.last_apply && st.last_apply.ok ? h('p', { class: 'small muted' },
+      `Règles en place sur le PC (${st.last_apply.method === 'mdm' ? 'pont MDM' : 'stratégie locale'}) : ${st.last_apply.exceptions} programme(s) ou dossier(s) approuvé(s), ${fmtAgo(st.last_apply.at)}.`) : null,
     st.mode !== 'off' ? h('div', null,
       h('div', { class: 'row', style: { 'margin-bottom': '8px' } }, h('h4', { style: { margin: 0 } }, st.mode === 'audit' ? 'Programmes qui seraient bloqués' : 'Programmes bloqués récemment'),
         h('div', { class: 'spacer' }), btn('Autoriser un dossier…', { small: true, icon: 'plus', onclick: () => allowFolderDialog(ctx, '') }),

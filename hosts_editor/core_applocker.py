@@ -18,6 +18,7 @@ and restored exactly when the mode is turned off.
 Known limits: not enforced in safe mode; Microsoft-signed system tools (LOLBins) remain usable.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -191,7 +192,7 @@ def exception_from_file_info(info: dict, label: str) -> dict:
 
 # 2: Appx collection added. Without it, once AppLocker is active Windows blocks every Store app
 # (Microsoft Store, Photos, HEIF extension...) with "bloquée par votre administrateur système".
-POLICY_VERSION = 2
+POLICY_VERSION = 3  # 3: revision checked, large policies through the MDM bridge from files
 
 
 def build_policy_xml(child_sids: list, mode: str, exceptions: list) -> str:
@@ -364,25 +365,50 @@ def _set_mdm_policy(collections) -> bool:
     for cls, _iid in _MDM_CLASSES.values():
         script += (f"Get-CimInstance -Namespace '{_MDM_NS}' -ClassName '{cls}' -Filter \"ParentID='{_MDM_PARENT}'\" "
                    f"-ErrorAction SilentlyContinue | Remove-CimInstance -ErrorAction SilentlyContinue; ")
-    for kind, xml in (collections or {}).items():
-        if kind not in _MDM_CLASSES:
-            continue
-        cls, iid = _MDM_CLASSES[kind]
-        escaped = xml.replace("'", "''")
-        script += (f"$p = [System.Security.SecurityElement]::Escape('{escaped}'); "
-                   f"New-CimInstance -Namespace '{_MDM_NS}' -ClassName '{cls}' "
-                   f"-Property @{{ParentID='{_MDM_PARENT}'; InstanceID='{iid}'; Policy=$p}} | Out-Null; ")
-    script += "'OK'"
-    r = _ps(script)
+    files = []
+    r = None
+    try:
+        for kind, xml in (collections or {}).items():
+            if kind not in _MDM_CLASSES:
+                continue
+            cls, iid = _MDM_CLASSES[kind]
+            # Large policies (hundreds of programs allowed) do not fit on a command line: read from a file.
+            fd, path = tempfile.mkstemp(prefix="hots_applocker_csp_", suffix=".xml")
+            files.append(path)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(xml)
+            script += (f"$x = Get-Content -Raw -Encoding UTF8 -LiteralPath {_ps_quote(path)}; "
+                       f"$p = [System.Security.SecurityElement]::Escape($x); "
+                       f"New-CimInstance -Namespace '{_MDM_NS}' -ClassName '{cls}' "
+                       f"-Property @{{ParentID='{_MDM_PARENT}'; InstanceID='{iid}'; Policy=$p}} | Out-Null; ")
+        script += "'OK'"
+        r = _ps(script, timeout=300)
+    finally:
+        for path in files:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
     if not _ps_ok(r):
-        logger.warning("AppLocker CSP (MDM bridge) failed: %s", ((r.stderr or r.stdout) if r else "").strip()[:300])
+        detail = ((r.stderr or r.stdout) if r else "").strip()
+        logger.warning("AppLocker CSP (MDM bridge) failed: %s", detail[:300])
+        _set_mdm_policy.last_error = detail[-300:]
         return False
     return True
 
 
-def _effective() -> bool:
+_set_mdm_policy.last_error = ""
+
+
+def policy_revision(xml: str) -> str:
+    return hashlib.sha256(xml.encode("utf-8")).hexdigest()[:16]
+
+
+def _effective(revision: str = "") -> bool:
+    """Our policy is in force; with `revision`, this exact version of it (not an older one)."""
     r = _ps("Get-AppLockerPolicy -Effective -Xml")
-    return r is not None and RULE_PREFIX in (r.stdout or "")
+    out = (r.stdout or "") if r is not None else ""
+    return RULE_PREFIX in out and (not revision or f"rev:{revision}" in out)
 
 
 def _run(args, timeout=60):
@@ -459,16 +485,25 @@ class AppLockerManager:
         except OSError as e:
             logger.warning("AppIDSvc start type not changed: %s", e)
         _run([os.path.join(_SYSTEM32, "sc.exe"), "start", "AppIDSvc"])
-        method = "local" if _set_local_policy(xml) and _effective() else None
-        if method is None:
-            method = "mdm" if _set_mdm_policy(split_collections(xml)) else None
+        revision = policy_revision(xml)
+        xml = xml.replace('Description="" UserOrGroupSid="S-1-1-0" Action="Allow"><Conditions><FilePathCondition',
+                          f'Description="rev:{revision}" UserOrGroupSid="S-1-1-0" Action="Allow"><Conditions><FilePathCondition', 1)
+        method = None
+        if _set_local_policy(xml) and _effective(revision):
+            method = "local"
+            _set_mdm_policy(None)  # an older policy left in the MDM bridge would still block (most restrictive wins)
+        elif _set_mdm_policy(split_collections(xml)):
+            method = "mdm"
         state.update({"mode": mode, "children": children, "exceptions": exceptions, "method": method,
                       "policy_version": POLICY_VERSION,
                       "since": state.get("since") if state.get("mode") == mode else time.time()})
+        error = "" if method else ("Windows n'a pas accepté la stratégie AppLocker sur ce PC"
+                                   + (f" : {_set_mdm_policy.last_error}" if _set_mdm_policy.last_error else "."))
+        state["last_apply"] = {"ok": bool(method), "error": error, "at": time.time(), "method": method,
+                               "exceptions": len(exceptions), "revision": revision}
         _save_state(state)
         if method is None:
-            AppLockerManager.last_error = ("Windows n'a pas accepté la stratégie AppLocker sur ce PC "
-                                           "(édition non prise en charge ?).")
+            AppLockerManager.last_error = error
             return False
         logger.info("applocker: %s via %s for %s", mode, method, children)
         return True
@@ -590,6 +625,7 @@ class AppLockerManager:
         cur = AppLockerManager.current()
         cur["events"] = state.get("events") or []
         cur["events_at"] = state.get("events_at")
+        cur["last_apply"] = state.get("last_apply") or {}
         return cur
 
     @staticmethod

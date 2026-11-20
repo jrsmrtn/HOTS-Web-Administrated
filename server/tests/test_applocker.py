@@ -204,3 +204,72 @@ def test_file_approval_remembers_its_program(tmp_path, monkeypatch):
 def test_folder_scan_includes_hidden_folders():
     """Regression: MCNL keeps its programs in hidden subfolders; Get-ChildItem skips them without -Force."""
     assert "-Recurse -Force" in al._PS_FOLDER_INFO
+
+
+def _many_hash_exceptions(n):
+    return [al.clean_exception({"kind": "hash", "hash": f"{i:064x}", "file_name": f"PROG{i}.EXE", "file_length": 1000})
+            for i in range(n)]
+
+
+def test_large_policy_goes_through_the_mdm_bridge_from_files(tmp_path, monkeypatch):
+    """Regression: 345 approved programs never reached Windows (policy passed on the PowerShell command line,
+    which is limited to 32 767 characters) while the console listed them as approved."""
+    monkeypatch.setattr(al, "STATE_FILE", str(tmp_path / "applocker.json"))
+    monkeypatch.setattr("hosts_editor.core_antispy._is_admin", lambda: True)
+    monkeypatch.setattr(al, "_appid_start", lambda value=None: 2)
+    monkeypatch.setattr(al, "_run", lambda *a, **k: None)
+    monkeypatch.setattr(al, "_local_policy_xml", lambda: "")
+    scripts = []
+
+    def fake_ps(script, timeout=120):
+        scripts.append(script)
+        if "Get-AppLockerPolicy -Effective" in script:  # Windows Home: the local policy is not the one in force
+            return types.SimpleNamespace(returncode=0, stdout="<AppLockerPolicy />", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="OK", stderr="")
+    monkeypatch.setattr(al, "_ps", fake_ps)
+    exceptions = _many_hash_exceptions(345)
+    assert al.AppLockerManager._apply("enforce", [CHILD], exceptions)
+    st = al._load_state()
+    assert st["method"] == "mdm" and st["last_apply"]["ok"] and st["last_apply"]["exceptions"] == 345
+    csp = [s for s in scripts if "New-CimInstance" in s]
+    assert csp and all(len(s) < 8000 for s in csp)  # XML read from files, not on the command line
+    assert not any("PROG100.EXE" in s for s in scripts)
+
+
+def test_local_policy_must_be_this_revision_and_clears_old_mdm(tmp_path, monkeypatch):
+    monkeypatch.setattr(al, "STATE_FILE", str(tmp_path / "applocker.json"))
+    monkeypatch.setattr("hosts_editor.core_antispy._is_admin", lambda: True)
+    monkeypatch.setattr(al, "_appid_start", lambda value=None: 2)
+    monkeypatch.setattr(al, "_run", lambda *a, **k: None)
+    monkeypatch.setattr(al, "_local_policy_xml", lambda: "")
+    written = {}
+
+    def fake_set_local(xml):
+        written["xml"] = xml
+        return True
+    monkeypatch.setattr(al, "_set_local_policy", fake_set_local)
+    mdm_calls = []
+    monkeypatch.setattr(al, "_set_mdm_policy", lambda c: mdm_calls.append(c) or True)
+    effective = {"xml": f"{al.RULE_PREFIX} old policy rev:0000000000000000"}
+    monkeypatch.setattr(al, "_ps", lambda script, timeout=120: types.SimpleNamespace(returncode=0, stdout=effective["xml"], stderr=""))
+    # an older HOTS policy in force is not taken for the new one: fallback to the MDM bridge
+    assert al.AppLockerManager._apply("enforce", [CHILD], _many_hash_exceptions(3))
+    assert al._load_state()["method"] == "mdm" and mdm_calls and mdm_calls[-1]
+    # the new revision is in force: local policy, and our old MDM policy is removed
+    mdm_calls.clear()
+    monkeypatch.setattr(al, "_ps", lambda script, timeout=120: types.SimpleNamespace(returncode=0, stdout=written["xml"], stderr=""))
+    assert al.AppLockerManager._apply("enforce", [CHILD], _many_hash_exceptions(4))
+    assert al._load_state()["method"] == "local" and mdm_calls == [None]
+    assert "rev:" in written["xml"]
+
+
+def test_failed_application_is_reported(tmp_path, monkeypatch):
+    monkeypatch.setattr(al, "STATE_FILE", str(tmp_path / "applocker.json"))
+    monkeypatch.setattr("hosts_editor.core_antispy._is_admin", lambda: True)
+    monkeypatch.setattr(al, "_appid_start", lambda value=None: 2)
+    monkeypatch.setattr(al, "_run", lambda *a, **k: None)
+    monkeypatch.setattr(al, "_local_policy_xml", lambda: "")
+    monkeypatch.setattr(al, "_ps", lambda script, timeout=120: types.SimpleNamespace(returncode=1, stdout="", stderr="Accès refusé"))
+    assert not al.AppLockerManager._apply("enforce", [CHILD], _many_hash_exceptions(2))
+    last = al.AppLockerManager.status()["last_apply"]
+    assert last["ok"] is False and "Accès refusé" in last["error"]
