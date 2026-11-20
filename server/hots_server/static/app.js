@@ -1303,6 +1303,14 @@ function folderChoices(path) {
 }
 
 async function allowFolderDialog(ctx, programPath) {
+  if (verNewer('1.3.1', ctx.device.agent_version || '0')) {
+    // Folder rules arrived with HOTS Hosts 2.9.1 (agent 1.3.1): an older PC answers "type d'exception inconnu".
+    return modal({
+      title: 'Mettez d\'abord ce PC à jour', iconName: 'alert',
+      body: h('p', null, `Ce PC a HOTS Hosts ${ctx.device.app_version || '(ancienne version)'} : l'autorisation d'un dossier demande la version 2.9.1 ou plus récente. Mettez le PC à jour (onglet Outils, ou nouvel installateur lancé sur le PC), puis réessayez.`),
+      actions: [{ label: 'OK', kind: 'primary', value: true }],
+    });
+  }
   const choices = folderChoices(programPath);
   const fields = choices.length
     ? [{ name: 'path', label: 'Dossier à autoriser', type: 'select', value: choices[0], options: choices.map((f) => [f, f.replace(/^%OSDRIVE%/, 'C:')]) }]
