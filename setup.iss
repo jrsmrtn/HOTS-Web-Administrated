@@ -1,6 +1,6 @@
 
 #define MyAppName "HOTS Hosts"
-#define MyAppVersion "2.9.1"
+#define MyAppVersion "2.9.2"
 #define MyAppPublisher "Darsono"
 #define MyAppExeName "HOTS Hosts.exe"
 #define AgentExeName "HOTS Remote Agent.exe"
@@ -32,9 +32,9 @@ OutputBaseFilename=HOTS_Hosts_setup
 SetupIconFile=icon.ico
 SolidCompression=yes
 WizardStyle=modern dynamic
-; Same mutex that hosts_editor_launcher.pyw holds while the app runs; lets Inno
-; detect a running instance and ask to close it before touching files in {app}.
-AppMutex=Global\HOTS_HostsEditor_SingleInstance_Mutex
+; The app's mutex (Global\HOTS_HostsEditor_SingleInstance_Mutex, held by hosts_editor_launcher.pyw) is
+; checked in EnsureAppClosed() rather than with AppMutex=: in silent mode AppMutex cancels Setup when the
+; app is still closing (update started from the app) or open in a session (update started from the console).
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
@@ -98,6 +98,49 @@ end;
 function RelaunchAfterUpdate(): Boolean;
 begin
   Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;
+
+function AppIsRunning(): Boolean;
+begin
+  Result := CheckForMutexes('Global\HOTS_HostsEditor_SingleInstance_Mutex');
+end;
+
+// Silent (update from the app or from the web console): wait up to 15 s for the app to finish closing,
+// then close it. Interactive: ask the user to close it.
+function EnsureAppClosed(Silent: Boolean): Boolean;
+var
+  I, RC: Integer;
+begin
+  Result := True;
+  if not AppIsRunning() then
+    Exit;
+  if Silent then
+  begin
+    for I := 1 to 30 do
+    begin
+      Sleep(500);
+      if not AppIsRunning() then
+        Exit;
+    end;
+    Log('HOTS Hosts is still running: closing it for the update');
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM "{#MyAppExeName}"', '', SW_HIDE, ewWaitUntilTerminated, RC);
+    Sleep(1500);
+    Exit;
+  end;
+  while AppIsRunning() do
+  begin
+    if MsgBox(Tr('HOTS Hosts est ouvert. Fermez-le, puis cliquez sur OK pour continuer.',
+                 'HOTS Hosts is running. Close it, then click OK to continue.'), mbInformation, MB_OKCANCEL) = IDCANCEL then
+    begin
+      Result := False;
+      Exit;
+    end;
+  end;
+end;
+
+function InitializeSetup(): Boolean;
+begin
+  Result := EnsureAppClosed(WizardSilent);
 end;
 
 function AgentConfigFile(): String;
@@ -648,7 +691,9 @@ function InitializeUninstall(): Boolean;
 var
   Hash: String;
 begin
-  Result := True;
+  Result := EnsureAppClosed(UninstallSilent);
+  if not Result then
+    Exit;
 
   if not UninstallSilent then
   begin
