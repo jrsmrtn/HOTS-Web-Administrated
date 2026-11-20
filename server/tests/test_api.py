@@ -235,3 +235,13 @@ def test_change_email(admin):
     client.post("/api/auth/logout")
     assert client.post("/api/auth/login", json={"email": "durand.parents@example.com", "password": "motdepasse-durand"}).status_code == 200
     assert client.post(f"/api/admin/users/{durand['id']}/email", json={"email": "x@example.com"}).status_code in (401, 403)
+
+
+def test_console_assets_are_versioned_and_revalidated(client, monkeypatch):
+    """After a server update the browser must load the new console (no stale app.js)."""
+    from hots_server import updater
+    monkeypatch.setattr(updater, "current_version", lambda: "v9.9.9")
+    html = client.get("/").text
+    assert '"/static/app.js?v=v9.9.9"' in html and '"/static/style.css?v=v9.9.9"' in html
+    r = client.get("/static/app.js?v=v9.9.9")
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"

@@ -180,9 +180,11 @@ def test_folder_scan_allows_what_is_there_now(tmp_path, monkeypatch):
     assert al.AppLockerManager.add_exception({"kind": "folder_scan", "path": r"%OSDRIVE%\MCNL", "label": "MCNL"})
     exc = al.AppLockerManager.current()["exceptions"]
     kinds = sorted(e["kind"] for e in exc)
-    assert kinds == ["hash", "hash", "publisher"]  # one rule per publisher, one per unsigned program, no path rule
-    assert {e["source"] for e in exc if e["kind"] == "hash"} == {r"C:\MCNL\MCNL.EXE", r"C:\MCNL\APPS\FRANCAIS\E-VERBE.X86.EXE"}
-    # scanning again does not duplicate
+    assert kinds == ["hash"] * 4  # a folder snapshot is fingerprints only (compact), no path rule
+    assert {e["source"] for e in exc} == {r"C:\MCNL\MCNL.EXE", r"C:\MCNL\APPS\FRANCAIS\E-VERBE.X86.EXE",
+                                         r"C:\MCNL\OUTILS\JRE\BIN\JAVAW.EXE", r"C:\MCNL\OUTILS\JRE\BIN\JAVA.EXE"}
+    # scanning again replaces the previous scan of this folder (no duplicates, no leftovers)
+    found.pop()
     assert al.AppLockerManager.add_exception({"kind": "folder_scan", "path": r"%OSDRIVE%\MCNL"})
     assert len(al.AppLockerManager.current()["exceptions"]) == 3
     monkeypatch.setattr(al, "_ps", lambda script, timeout=120: types.SimpleNamespace(returncode=0, stdout="[]", stderr=""))
@@ -250,6 +252,7 @@ def test_local_policy_must_be_this_revision_and_clears_old_mdm(tmp_path, monkeyp
     monkeypatch.setattr(al, "_set_local_policy", fake_set_local)
     mdm_calls = []
     monkeypatch.setattr(al, "_set_mdm_policy", lambda c: mdm_calls.append(c) or True)
+    monkeypatch.setattr(al, "_conversion_result", lambda since: (True, ""))  # Windows log: 8001 policy applied
     effective = {"xml": f"{al.RULE_PREFIX} old policy rev:0000000000000000"}
     monkeypatch.setattr(al, "_ps", lambda script, timeout=120: types.SimpleNamespace(returncode=0, stdout=effective["xml"], stderr=""))
     # an older HOTS policy in force is not taken for the new one: fallback to the MDM bridge
@@ -304,3 +307,43 @@ def test_folder_with_too_many_programs_is_refused_not_cut(tmp_path, monkeypatch)
     monkeypatch.setattr(al, "_ps", lambda script, timeout=120: types.SimpleNamespace(returncode=0, stdout=_json.dumps(items), stderr=""))
     assert not al.AppLockerManager.add_exception({"kind": "folder_scan", "path": r"C:\BIG"})
     assert "Plus de 5 programmes" in al.AppLockerManager.last_error and al.AppLockerManager.current()["exceptions"] == []
+
+
+
+def test_policy_stays_within_windows_limits(tmp_path, monkeypatch):
+    """Regression: 375 fingerprints + 94 publishers were too big for Windows ("conversion de stratégie AppID a
+    échoué : ACL non valide"), the old policy stayed in force and MCNL stayed blocked."""
+    hs = [al.clean_exception({"kind": "hash", "hash": f"{i:064x}", "file_name": f"P{i}.EXE", "file_length": 1}) for i in range(470)]
+    root = ET.fromstring(al.build_policy_xml([CHILD], "enforce", hs))
+    deny = next(r for r in root.find("RuleCollection").findall("FilePathRule") if r.find("Exceptions") is not None)
+    conds = deny.find("Exceptions").findall("FileHashCondition")
+    assert len(conds) == 1 and len(conds[0].findall("FileHash")) == 470
+    assert al.estimate_acl_bytes(hs) < al.ACL_BUDGET
+    pubs = [al.clean_exception({"kind": "publisher", "publisher": "O=RARE IDEAS, LLC, L=SPRINGFIELD, S=MASSACHUSETTS, C=US",
+                                "product": f"PORTABLE APP {i}"}) for i in range(94)]
+    assert al.estimate_acl_bytes(pubs + hs[:375]) > al.ACL_BUDGET
+    # too big: refused with a clear message, nothing sent to Windows
+    monkeypatch.setattr(al, "STATE_FILE", str(tmp_path / "applocker.json"))
+    monkeypatch.setattr("hosts_editor.core_antispy._is_admin", lambda: True)
+    monkeypatch.setattr(al, "_appid_start", lambda value=None: 2)
+    monkeypatch.setattr(al, "_run", lambda *a, **k: None)
+    monkeypatch.setattr(al, "_local_policy_xml", lambda: "")
+    monkeypatch.setattr(al, "_set_local_policy", lambda xml: (_ for _ in ()).throw(AssertionError("must not be called")))
+    assert not al.AppLockerManager._apply("enforce", [CHILD], pubs + hs[:375])
+    assert "Ko de règles" in al.AppLockerManager.status()["last_apply"]["error"]
+
+
+def test_conversion_failure_reported_by_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(al, "STATE_FILE", str(tmp_path / "applocker.json"))
+    monkeypatch.setattr("hosts_editor.core_antispy._is_admin", lambda: True)
+    monkeypatch.setattr(al, "_appid_start", lambda value=None: 2)
+    monkeypatch.setattr(al, "_run", lambda *a, **k: None)
+    monkeypatch.setattr(al, "_local_policy_xml", lambda: "")
+    monkeypatch.setattr(al, "_set_local_policy", lambda xml: True)
+    monkeypatch.setattr(al, "_effective", lambda revision="": True)
+    monkeypatch.setattr(al, "_set_mdm_policy", lambda c: (_ for _ in ()).throw(AssertionError("no MDM fallback")) if c else True)
+    monkeypatch.setattr(al, "_ps", lambda script, timeout=120: types.SimpleNamespace(
+        returncode=0, stdout="8000|La conversion de stratégie AppID a échoué. Status Structure de liste de contrôle de l'accès (ACL) non valide.", stderr=""))
+    assert not al.AppLockerManager._apply("enforce", [CHILD], [])
+    last = al.AppLockerManager.status()["last_apply"]
+    assert last["ok"] is False and "ACL" in last["error"]

@@ -10,7 +10,7 @@ import time
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -1229,8 +1229,30 @@ async def health(request: Request):
     return JSONResponse({"ok": True, "version": updater.current_version()})
 
 
+_INDEX_CACHE = {}
+
+
 async def index(request: Request):
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"), headers={"Cache-Control": "no-cache"})
+    """index.html with versioned asset URLs: after a server update, browsers load the new console at once."""
+    version = updater.current_version()
+    html = _INDEX_CACHE.get(version)
+    if html is None:
+        with open(os.path.join(STATIC_DIR, "index.html"), "r", encoding="utf-8") as f:
+            html = f.read()
+        tag = re.sub(r"[^\w.-]", "", version) or "dev"
+        for asset in ("/static/app.js", "/static/style.css"):
+            html = html.replace(f'"{asset}"', f'"{asset}?v={tag}"')
+        _INDEX_CACHE[version] = html
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+
+
+class _StaticFiles(StaticFiles):
+    """Console files: always revalidated (cheap with ETag), never an old app.js after an update."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 # --- maintenance ---------------------------------------------------------------------------------------
@@ -1405,7 +1427,7 @@ routes = [
     Route("/api/agent/poll", agent_poll, methods=["POST"]),
     Route("/api/agent/results", agent_results, methods=["POST"]),
     Route("/api/agent/goodbye", agent_goodbye, methods=["POST"]),
-    Mount("/static", app=StaticFiles(directory=STATIC_DIR), name="static"),
+    Mount("/static", app=_StaticFiles(directory=STATIC_DIR), name="static"),
 ]
 
 

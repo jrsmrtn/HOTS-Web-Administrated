@@ -161,13 +161,14 @@ _PS_FOLDER_INFO = (
 
 
 def exceptions_from_folder_info(items: list, folder_label: str) -> list:
-    """Pure: one publisher exception per (publisher, product), one hash exception per unsigned program."""
+    """Pure: one fingerprint exception per program found (signed or not). A folder snapshot does not need
+    publisher rules, whose long names quickly exceed what Windows can convert (64 KB)."""
     out, seen = [], set()
     for info in items if isinstance(items, list) else []:
         if not isinstance(info, dict):
             continue
         try:
-            exc = exception_from_file_info(info, f"{folder_label} : {info.get('file') or '?'}")
+            exc = exception_from_file_info(dict(info, publisher=None), f"{folder_label} : {info.get('file') or '?'}")
         except ValueError:
             continue
         if isinstance(info.get("path"), str):
@@ -192,7 +193,7 @@ def exception_from_file_info(info: dict, label: str) -> dict:
 
 # 2: Appx collection added. Without it, once AppLocker is active Windows blocks every Store app
 # (Microsoft Store, Photos, HEIF extension...) with "bloquée par votre administrateur système".
-POLICY_VERSION = 3  # 3: revision checked, large policies through the MDM bridge from files
+POLICY_VERSION = 4  # 4: one FileHashCondition for all fingerprints (Windows' 64 KB ACL limit)
 
 
 def build_policy_xml(child_sids: list, mode: str, exceptions: list) -> str:
@@ -207,6 +208,14 @@ def build_policy_xml(child_sids: list, mode: str, exceptions: list) -> str:
     exc = [r'<FilePathCondition Path="%WINDIR%\*" />', r'<FilePathCondition Path="%PROGRAMFILES%\*" />',
            f'<FilePublisherCondition PublisherName={quoteattr(MICROSOFT_PUBLISHER)} ProductName="*" BinaryName="*">'
            '<BinaryVersionRange LowSection="*" HighSection="*" /></FilePublisherCondition>']
+    hashes = {}
+    for e in exceptions:
+        if e["kind"] == "hash":
+            hashes.setdefault(e["hash"], e)
+    if hashes:
+        exc.append("<FileHashCondition>" + "".join(
+            f'<FileHash Type="SHA256" Data={quoteattr(h)} SourceFileName={quoteattr(e["file_name"])} '
+            f'SourceFileLength="{int(e["file_length"])}" />' for h, e in hashes.items()) + "</FileHashCondition>")
     for e in exceptions:
         if e["kind"] == "publisher":
             exc.append(f'<FilePublisherCondition PublisherName={quoteattr(e["publisher"])} '
@@ -214,10 +223,6 @@ def build_policy_xml(child_sids: list, mode: str, exceptions: list) -> str:
                        '<BinaryVersionRange LowSection="*" HighSection="*" /></FilePublisherCondition>')
         elif e["kind"] == "folder":
             exc.append(f'<FilePathCondition Path={quoteattr(e["path"] + chr(92) + "*")} />')
-        elif e["kind"] == "hash":
-            exc.append(f'<FileHashCondition><FileHash Type="SHA256" Data={quoteattr(e["hash"])} '
-                       f'SourceFileName={quoteattr(e["file_name"])} SourceFileLength="{int(e["file_length"])}" />'
-                       '</FileHashCondition>')
     rules = [f'<FilePathRule Id="{_rid("allow-everyone")}" Name="{RULE_PREFIX} tous les comptes - tout autoriser" '
              'Description="" UserOrGroupSid="S-1-1-0" Action="Allow">'
              '<Conditions><FilePathCondition Path="*" /></Conditions></FilePathRule>']
@@ -400,6 +405,48 @@ def _set_mdm_policy(collections) -> bool:
 _set_mdm_policy.last_error = ""
 
 
+ACL_BUDGET = 48000  # bytes; Windows converts the Exe rules into one ACL of 64 KB at most
+
+
+def estimate_acl_bytes(exceptions: list, children: int = 1) -> int:
+    """Rough size of the converted Exe rules (conditional ACEs, UTF-16 strings, 32-byte hashes)."""
+    per_child = 2500 + 300 * len(WRITABLE_WINDOWS_DIRS)
+    hashes = {e["hash"] for e in exceptions if e.get("kind") == "hash"}
+    per_child += 60 + 40 * len(hashes)
+    for e in exceptions:
+        if e.get("kind") == "publisher":
+            per_child += 120 + 2 * (len(e.get("publisher", "")) + len(e.get("product", "")) + 20)
+        elif e.get("kind") == "folder":
+            per_child += 60 + 2 * len(e.get("path", ""))
+    return 400 + max(1, children) * per_child
+
+
+def _norm_path(p: str) -> str:
+    return (p or "").upper().replace("%OSDRIVE%", os.environ.get("SystemDrive", "C:").upper()).rstrip("\\")
+
+
+_PS_CONVERSION = (
+    "$ErrorActionPreference='SilentlyContinue'; "
+    "$e = Get-WinEvent -FilterHashtable @{{LogName='Microsoft-Windows-AppLocker/EXE and DLL'; Id=8000,8001; "
+    "StartTime=[datetime]::Parse('{since}')}} -MaxEvents 5 | Sort-Object TimeCreated -Descending | Select-Object -First 1; "
+    "if ($e) {{ '' + $e.Id + '|' + $e.Message }} else {{ 'NONE' }}")
+
+
+def _conversion_result(since: float) -> tuple:
+    """(ok, message) from the AppLocker log after a policy change: 8001 applied, 8000 conversion failed."""
+    from datetime import datetime
+    stamp = datetime.fromtimestamp(since - 2).strftime("%Y-%m-%dT%H:%M:%S")
+    for _ in range(6):
+        r = _ps(_PS_CONVERSION.format(since=stamp), timeout=60)
+        out = (r.stdout or "").strip() if r is not None else ""
+        if out.startswith("8000|"):
+            return False, out[5:].strip()[:300]
+        if out.startswith("8001|"):
+            return True, ""
+        time.sleep(2)
+    return True, ""  # no event (older Windows): trust the effective policy check
+
+
 def policy_revision(xml: str) -> str:
     return hashlib.sha256(xml.encode("utf-8")).hexdigest()[:16]
 
@@ -542,19 +589,36 @@ class AppLockerManager:
         revision = policy_revision(xml)
         xml = xml.replace('Description="" UserOrGroupSid="S-1-1-0" Action="Allow"><Conditions><FilePathCondition',
                           f'Description="rev:{revision}" UserOrGroupSid="S-1-1-0" Action="Allow"><Conditions><FilePathCondition', 1)
+        size = estimate_acl_bytes(exceptions, len(children))
+        if size > ACL_BUDGET:
+            error = (f"trop de programmes approuvés pour Windows (environ {size // 1024} Ko de règles, 64 Ko au maximum). "
+                     "Refaites « Dossier… » sur le dossier du logiciel (« programmes présents maintenant ») : la nouvelle "
+                     "analyse remplace l'ancienne, en plus compact. Sinon, retirez des approbations.")
+            state["last_apply"] = {"ok": False, "error": error, "at": time.time(), "method": state.get("method"),
+                                   "exceptions": len(exceptions), "size": size}
+            _save_state(state)
+            AppLockerManager.last_error = error
+            return False
         method = None
+        conversion_error = ""
+        started = time.time()
         if _set_local_policy(xml) and _effective(revision):
-            method = "local"
-            _set_mdm_policy(None)  # an older policy left in the MDM bridge would still block (most restrictive wins)
-        elif _set_mdm_policy(split_collections(xml)):
+            converted, conversion_error = _conversion_result(started)
+            if converted:
+                method = "local"
+                _set_mdm_policy(None)  # an older policy left in the MDM bridge would still block (most restrictive wins)
+        if method is None and not conversion_error and _set_mdm_policy(split_collections(xml)):
             method = "mdm"
         state.update({"mode": mode, "children": children, "exceptions": exceptions, "method": method,
                       "policy_version": POLICY_VERSION,
                       "since": state.get("since") if state.get("mode") == mode else time.time()})
-        error = "" if method else ("Windows n'a pas accepté la stratégie AppLocker sur ce PC"
-                                   + (f" : {_set_mdm_policy.last_error}" if _set_mdm_policy.last_error else "."))
+        if conversion_error:
+            error = f"Windows n'a pas pu appliquer les règles : {conversion_error}"
+        else:
+            error = "" if method else ("Windows n'a pas accepté la stratégie AppLocker sur ce PC"
+                                       + (f" : {_set_mdm_policy.last_error}" if _set_mdm_policy.last_error else "."))
         state["last_apply"] = {"ok": bool(method), "error": error, "at": time.time(), "method": method,
-                               "exceptions": len(exceptions), "revision": revision}
+                               "exceptions": len(exceptions), "revision": revision, "size": size}
         _save_state(state)
         if method is None:
             AppLockerManager.last_error = error
@@ -604,7 +668,11 @@ class AppLockerManager:
                 return False
         ids = {e["id"] for e in new}
         cur = AppLockerManager.current()
-        exceptions = [e for e in cur["exceptions"] if e["id"] not in ids] + new
+        keep = cur["exceptions"]
+        if exc["kind"] == "folder_scan":
+            prefix = _norm_path(exc["path"]) + "\\"
+            keep = [e for e in keep if not _norm_path(e.get("source", "")).startswith(prefix)]
+        exceptions = [e for e in keep if e["id"] not in ids] + new
         if cur["mode"] == "off":
             state = _load_state()
             state["exceptions"] = exceptions
