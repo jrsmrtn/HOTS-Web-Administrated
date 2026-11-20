@@ -110,3 +110,40 @@ def test_outdated_policy_is_reapplied(tmp_path, monkeypatch):
                     "policy_version": al.POLICY_VERSION})
     applied.clear()
     assert al.AppLockerManager.repair() is False and applied == []
+
+
+def test_every_blocked_program_can_be_allowed():
+    """Regression: no "Autoriser" button for programs signed by a person (CN=...) or events without hash."""
+    events = [
+        {"id": 8004, "time": "2026-11-20T10:00:00Z", "user": CHILD, "path": r"%OSDRIVE%\USERS\LEA\DOWNLOADS\OUTIL.EXE",
+         "hash": "", "fqbn": r"CN=JEAN DUPONT, O=JEAN DUPONT, C=FR\OUTIL\OUTIL.EXE\1.0"},
+        {"id": 8004, "time": "2026-11-20T10:01:00Z", "user": CHILD, "path": r"%OSDRIVE%\USERS\LEA\DESKTOP\JEU.EXE",
+         "hash": "", "fqbn": "-"},
+    ]
+    groups = {g["name"]: g for g in al.summarize_events(events, [CHILD])}
+    assert groups["OUTIL.EXE"]["suggestion"]["kind"] == "publisher"
+    assert al.clean_exception(groups["OUTIL.EXE"]["suggestion"])["publisher"].startswith("CN=JEAN DUPONT")
+    assert groups["JEU.EXE"]["suggestion"] == {"kind": "file", "path": r"%OSDRIVE%\USERS\LEA\DESKTOP\JEU.EXE",
+                                               "label": "JEU.EXE"}
+    with pytest.raises(ValueError):
+        al.clean_exception({"kind": "file", "path": "C:\\Users\\*"})
+
+
+def test_file_exception_is_resolved_on_the_pc(tmp_path, monkeypatch):
+    monkeypatch.setattr(al, "STATE_FILE", str(tmp_path / "applocker.json"))
+    exe = tmp_path / "JEU.EXE"
+    exe.write_bytes(b"MZ")
+    monkeypatch.setattr(al, "expand_event_path", lambda p: str(exe) if "DESKTOP" in p else "")
+    outputs = {"value": '{"hash":"0x' + "AB" * 32 + '","file":"JEU.EXE","length":2}'}
+    monkeypatch.setattr(al, "_ps", lambda script, timeout=120: types.SimpleNamespace(returncode=0, stdout=outputs["value"], stderr=""))
+    ok = al.AppLockerManager.add_exception({"kind": "file", "path": r"%OSDRIVE%\USERS\LEA\DESKTOP\JEU.EXE", "label": "JEU.EXE"})
+    assert ok  # mode off: stored only
+    exc = al.AppLockerManager.current()["exceptions"][0]
+    assert exc["kind"] == "hash" and exc["hash"] == "0x" + "AB" * 32 and exc["file_length"] == 2
+    outputs["value"] = ('{"hash":"0x' + "CD" * 32 + '","file":"JEU.EXE","length":2,'
+                        '"publisher":"O=ROBLOX CORPORATION, L=SAN MATEO, S=CALIFORNIA, C=US","product":"ROBLOX"}')
+    assert al.AppLockerManager.add_exception({"kind": "file", "path": r"%OSDRIVE%\USERS\LEA\DESKTOP\JEU.EXE"})
+    assert al.AppLockerManager.current()["exceptions"][-1]["kind"] == "publisher"
+    # program on a USB stick: clear message instead of a silent failure
+    assert not al.AppLockerManager.add_exception({"kind": "file", "path": r"%REMOVABLE%\JEU.EXE"})
+    assert "clé USB" in al.AppLockerManager.last_error

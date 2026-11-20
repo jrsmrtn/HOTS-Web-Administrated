@@ -410,6 +410,9 @@ class DemoPC:
         if action == "applocker.allow":
             try:
                 exc = clean_exception(p.get("exception"))
+                if exc["kind"] == "file":  # a real PC reads the file; the demo uses a fake fingerprint
+                    exc = clean_exception({"kind": "hash", "hash": hashlib.sha256(exc["path"].encode()).hexdigest(),
+                                           "file_name": exc["label"], "label": exc["label"]})
             except ValueError as e:
                 return False, None, f"Exception invalide : {e}", True
             self.applocker["exceptions"] = [e for e in self.applocker["exceptions"] if e["id"] != exc["id"]] + [exc]

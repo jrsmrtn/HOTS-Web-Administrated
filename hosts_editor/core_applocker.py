@@ -70,7 +70,7 @@ def clean_exception(raw) -> dict:
     if kind == "publisher":
         publisher = str(raw.get("publisher") or "").strip()
         product = str(raw.get("product") or "*").strip() or "*"
-        if not re.fullmatch(r"O=[^\r\n<>&\"]{1,300}", publisher) or len(product) > 200 or re.search(r"[<>&\"\r\n]", product):
+        if not re.fullmatch(r"(O|CN)=[^\r\n<>&\"]{1,300}", publisher) or len(product) > 200 or re.search(r"[<>&\"\r\n]", product):
             raise ValueError("éditeur invalide")
         return {"id": _rid(f"pub|{publisher}|{product}")[:8], "kind": kind, "label": label or product,
                 "publisher": publisher, "product": product}
@@ -83,7 +83,48 @@ def clean_exception(raw) -> dict:
         digest = "0x" + digest[-64:].upper()
         return {"id": _rid(f"hash|{digest}")[:8], "kind": kind, "label": label or name, "hash": digest,
                 "file_name": name, "file_length": length}
+    if kind == "file":
+        # Resolved on the PC (publisher if signed, else hash) by AppLockerManager.add_exception: never kept
+        # as a path rule (the child could put anything at that path).
+        path = str(raw.get("path") or "").strip()
+        if not path or len(path) > 400 or re.search(r"[<>\"\r\n*?]", path):
+            raise ValueError("chemin invalide")
+        return {"kind": "file", "path": path, "label": label or os.path.basename(path.replace("\\", "/"))}
     raise ValueError("type d'exception inconnu")
+
+
+def expand_event_path(path: str) -> str:
+    """AppLocker event path ('%OSDRIVE%\\USERS\\LEA\\X.EXE') -> real path, '' if not resolvable here
+    (%REMOVABLE% / %HOT%: USB stick or CD whose drive letter is not in the event)."""
+    variables = {"%OSDRIVE%": os.environ.get("SystemDrive", "C:"),
+                 "%WINDIR%": os.environ.get("SystemRoot", r"C:\\Windows"),
+                 "%SYSTEM32%": os.path.join(os.environ.get("SystemRoot", r"C:\\Windows"), "System32"),
+                 "%PROGRAMFILES%": os.environ.get("ProgramFiles", r"C:\\Program Files")}
+    upper = path.upper()
+    for var, value in variables.items():
+        if upper.startswith(var):
+            return value + path[len(var):]
+    if re.match(r"^[A-Za-z]:\\", path):
+        return path
+    return ""
+
+
+_PS_FILE_INFO = (
+    "$ErrorActionPreference='Stop'; $i = Get-AppLockerFileInformation -Path {path}; "
+    "$o = [ordered]@{{ hash = [string]$i.Hash.HashDataString; file = [string]$i.Hash.SourceFileName; "
+    "length = [int64]$i.Hash.SourceFileLength }}; "
+    "if ($i.Publisher) {{ $o.publisher = [string]$i.Publisher.PublisherName; $o.product = [string]$i.Publisher.ProductName }}; "
+    "ConvertTo-Json -InputObject $o -Compress")
+
+
+def exception_from_file_info(info: dict, label: str) -> dict:
+    """Pure: Get-AppLockerFileInformation result -> publisher exception if signed, else hash exception."""
+    if info.get("publisher"):
+        return clean_exception({"kind": "publisher", "publisher": info["publisher"], "product": info.get("product") or "*",
+                                "label": label})
+    return clean_exception({"kind": "hash", "hash": info.get("hash"), "file_name": info.get("file") or label,
+                            "file_length": info.get("length") if isinstance(info.get("length"), int) else 0,
+                            "label": label})
 
 
 # 2: Appx collection added. Without it, once AppLocker is active Windows blocks every Store app
@@ -143,11 +184,12 @@ def split_collections(policy_xml: str) -> dict:
 
 
 def parse_fqbn(fqbn: str) -> dict:
-    """'O=ROBLOX CORPORATION, L=…, C=US\\ROBLOX\\ROBLOXPLAYERBETA.EXE\\1.2.3' -> parts ('-' = unsigned)."""
+    """'O=ROBLOX CORPORATION, L=…, C=US\\ROBLOX\\ROBLOXPLAYERBETA.EXE\\1.2.3' -> parts ('-' = unsigned).
+    Publishers signed by a person are 'CN=JEAN DUPONT, ...'."""
     if not fqbn or fqbn.strip() in ("-", ""):
         return {}
     parts = fqbn.split("\\")
-    if len(parts) < 2 or not parts[0].startswith("O="):
+    if len(parts) < 2 or not parts[0].startswith(("O=", "CN=")):
         return {}
     return {"publisher": parts[0], "product": parts[1] if len(parts) > 1 else "*",
             "binary": parts[2] if len(parts) > 2 else ""}
@@ -170,9 +212,12 @@ def summarize_events(events: list, child_sids: list) -> list:
             if fq:
                 suggestion = {"kind": "publisher", "publisher": fq["publisher"], "product": fq["product"] or "*",
                               "label": f"{fq['product'] or name} ({fq['publisher'].split(',')[0][2:].title()})"}
-            elif ev.get("hash"):
-                suggestion = {"kind": "hash", "hash": str(ev["hash"]), "file_name": name,
+            elif _HASH_RE.match(str(ev.get("hash") or "").strip()):
+                suggestion = {"kind": "hash", "hash": str(ev["hash"]).strip(), "file_name": name,
                               "file_length": ev.get("size") or 0, "label": name}
+            elif path:
+                # Nothing usable in the event: the PC reads the file itself when "Autoriser" is clicked.
+                suggestion = {"kind": "file", "path": path, "label": name}
             g = groups[key] = {"path": path, "name": name, "signed": bool(fq),
                                "publisher": fq.get("publisher", ""), "count": 0, "blocked": 0, "last": "",
                                "suggestion": suggestion}
@@ -394,6 +439,10 @@ class AppLockerManager:
     @staticmethod
     def add_exception(raw) -> bool:
         exc = clean_exception(raw)
+        if exc["kind"] == "file":
+            exc = AppLockerManager._resolve_file(exc)
+            if exc is None:
+                return False
         cur = AppLockerManager.current()
         exceptions = [e for e in cur["exceptions"] if e["id"] != exc["id"]] + [exc]
         if cur["mode"] == "off":
@@ -402,6 +451,26 @@ class AppLockerManager:
             _save_state(state)
             return True
         return AppLockerManager._apply(cur["mode"], cur["children"] or [], exceptions)
+
+    @staticmethod
+    def _resolve_file(exc: dict):
+        """Publisher (signed) or hash exception for a program blocked at `path`, read on this PC."""
+        real = expand_event_path(exc["path"])
+        if not real:
+            AppLockerManager.last_error = ("Ce programme était sur une clé USB ou un CD : rebranchez-la, lancez le "
+                                           "programme une fois (il sera bloqué), puis autorisez la nouvelle ligne.")
+            return None
+        if not os.path.isfile(real):
+            AppLockerManager.last_error = f"Programme introuvable sur le PC : {real} (supprimé ou déplacé ?)"
+            return None
+        r = _ps(_PS_FILE_INFO.format(path=_ps_quote(real)))
+        try:
+            info = json.loads((r.stdout or "").strip().splitlines()[-1]) if r is not None and r.returncode == 0 else None
+            return exception_from_file_info(info or {}, exc["label"])
+        except (ValueError, IndexError, TypeError) as e:
+            logger.warning("Get-AppLockerFileInformation %s: %s / %s", real, e, ((r.stderr or "") if r else "")[:300])
+            AppLockerManager.last_error = "Windows n'a pas pu lire la signature ou l'empreinte de ce programme."
+            return None
 
     @staticmethod
     def remove_exception(exc_id: str) -> bool:

@@ -1821,6 +1821,9 @@ async function tabActivity(ctx, box) {
         siteRows)) : h('p', { class: 'small muted' }, 'Aucun site enregistré.'),
       h('p', { class: 'small muted' }, 'Temps estimé : minutes pendant lesquelles le site a été utilisé, navigateur au premier plan.'),
       u.blocked_apps.length ? h('div', null, h('h4', null, 'Programmes bloqués'), h('ul', { class: 'items' }, u.blocked_apps.map((b) => h('li', null,
+        b.path && (st.applocker || {}).mode && st.applocker.mode !== 'off' ? btn('Autoriser', {
+          small: true, onclick: () => ctx.exec('applocker.allow', { exception: { kind: 'file', path: b.path, label: b.name } }, `Autoriser ${b.name}`, { reload: false }),
+        }) : null,
         h('span', null, h('strong', null, b.name), h('span', { class: 'small muted' }, ` · ${b.by} · ${b.n} fois, dernière à ${timeOfDay(b.last)}`),
           h('div', { class: 'small muted mono' }, b.path)))))) : null,
       u.titles.length ? h('details', null, h('summary', null, `Fenêtres et pages les plus vues (${u.titles.length})`),
